@@ -1,15 +1,16 @@
 name: Scout Clone to FVP
 
-run-name: "FVP Promotion | ${{ github.event.client_payload.folder_name }}"
+run-name: "FVP Promotion | ${{ github.event.client_payload.folder_name || inputs.folder_name }}"
 
 on:
+
   repository_dispatch:
     types:
       - fvp-promotion-approved
 
-  # Keep manual execution while we are testing.
   workflow_dispatch:
     inputs:
+
       folder_name:
         description: "Scout folder to promote to FVP"
         required: true
@@ -20,9 +21,10 @@ permissions:
   contents: read
 
 
-# Prevent duplicate promotion jobs for the same folder.
 concurrency:
+
   group: fvp-promotion-${{ github.event.client_payload.folder_name || inputs.folder_name }}
+
   cancel-in-progress: false
 
 
@@ -52,7 +54,7 @@ jobs:
 
 
       # ==========================================================
-      # 1. RESOLVE FOLDER NAME
+      # 1. RESOLVE APPROVED FOLDER
       # ==========================================================
 
       - name: Resolve Approved Folder
@@ -70,14 +72,7 @@ jobs:
           MANUAL_FOLDER: ${{ inputs.folder_name }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
-
-
-          Write-Host 'Trigger:'
-
-          Write-Host $env:EVENT_NAME
-
 
           if ($env:EVENT_NAME -eq 'repository_dispatch') {
 
@@ -92,9 +87,7 @@ jobs:
 
 
           if (-not $folderName) {
-
               throw 'folder_name was not provided.'
-
           }
 
 
@@ -102,16 +95,12 @@ jobs:
 
 
           if ($folderName -notmatch '^[A-Za-z0-9._() -]+$') {
-
               throw 'folder_name contains unsupported characters.'
-
           }
 
 
           if ($folderName.Contains('..')) {
-
               throw 'folder_name cannot contain ..'
-
           }
 
 
@@ -119,16 +108,11 @@ jobs:
 
 
           if (-not $folderName) {
-
               throw 'folder_name is invalid.'
-
           }
 
 
-          Write-Host ''
-
           Write-Host 'Approved folder:'
-
           Write-Host $folderName
 
 
@@ -140,7 +124,7 @@ jobs:
 
 
       # ==========================================================
-      # 2. VALIDATE REQUIRED SECRETS
+      # 2. VALIDATE SCOUT CONFIGURATION
       # ==========================================================
 
       - name: Validate Scout Configuration
@@ -158,39 +142,30 @@ jobs:
           FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
           if (-not $env:SCOUT_URL) {
-
               throw 'SCOUT_JFROG_URL secret is missing.'
-
           }
 
 
           if (-not $env:SCOUT_TOKEN) {
-
               throw 'SCOUT_JFROG_ACCESS_TOKEN secret is missing.'
-
           }
 
 
           if (-not $env:CLONE_REPO) {
-
               throw 'SCOUT_CLONE_REPO secret is missing.'
-
           }
 
 
           if (-not $env:FVP_REPO) {
-
               throw 'SCOUT_FVP_REPO secret is missing.'
-
           }
 
 
-          Write-Host 'Scout FVP promotion configuration is available.'
+          Write-Host 'Scout configuration validated.'
 
 
       # ==========================================================
@@ -215,22 +190,13 @@ jobs:
         shell: pwsh
 
         run: |
-
           $ErrorActionPreference = 'Stop'
-
 
           jf --version
 
 
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'JFrog CLI is unavailable.'
-
-          }
-
-
       # ==========================================================
-      # 5. CLEAN OLD CONFIGURATION
+      # 5. CLEAN OLD CONFIG
       # ==========================================================
 
       - name: Cleanup Existing Scout Configuration
@@ -240,17 +206,11 @@ jobs:
         continue-on-error: true
 
         run: |
-
-          jf c rm `
-              "$env:SCOUT_SERVER_ID" `
-              --quiet
+          jf c rm "$env:SCOUT_SERVER_ID" --quiet
 
 
       # ==========================================================
       # 6. CONFIGURE SCOUT
-      #
-      # Only ONE Scout connection is required because both
-      # repositories are on the same Scout JFrog instance.
       # ==========================================================
 
       - name: Configure Scout JFrog
@@ -264,7 +224,6 @@ jobs:
           SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
@@ -277,14 +236,12 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'Failed to configure Scout JFrog.'
-
           }
 
 
       # ==========================================================
-      # 7. VERIFY CONNECTION
+      # 7. VERIFY SCOUT CONNECTION
       # ==========================================================
 
       - name: Verify Scout Connection
@@ -292,7 +249,6 @@ jobs:
         shell: pwsh
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
@@ -301,38 +257,12 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
-              throw 'Unable to connect to Scout JFrog.'
-
+              throw 'Scout JFrog connection failed.'
           }
 
 
-          Write-Host 'Scout JFrog connection verified.'
-
-
       # ==========================================================
-      # 8. BUILD SOURCE AND TARGET PATHS
-      #
-      # Example:
-      #
-      # folder_name:
-      # POC-001
-      #
-      # Source:
-      # clone-repo/POC-001
-      #
-      # Target:
-      # fvp-repo/POC-001
-      #
-      # Copy mapping:
-      #
-      # clone-repo/POC-001/(**)
-      #             |
-      #             +----------> {1}
-      #
-      # fvp-repo/POC-001/{1}
-      #
-      # The source root folder is NOT duplicated.
+      # 8. BUILD COPY PATHS
       # ==========================================================
 
       - name: Build Promotion Paths
@@ -350,7 +280,6 @@ jobs:
           FOLDER_NAME: ${{ steps.request.outputs.folder_name }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
@@ -361,83 +290,50 @@ jobs:
           $folderName = $env:FOLDER_NAME.Trim().Trim('/')
 
 
-          if (-not $cloneRepo) {
-
-              throw 'Scout Clone repository is empty.'
-
-          }
-
-
-          if (-not $fvpRepo) {
-
-              throw 'Scout FVP repository is empty.'
-
-          }
-
-
-          if ($cloneRepo -eq $fvpRepo) {
-
-              throw 'Scout Clone and FVP repositories cannot be identical.'
-
-          }
-
-
           $sourceRoot = "$cloneRepo/$folderName"
 
           $targetRoot = "$fvpRepo/$folderName"
 
 
-          # Used only for source verification.
+          # Search pattern used only for validation.
           $sourceSearchPattern = "$sourceRoot/*"
 
 
-          # Explicit mapping prevents:
+          # Capture everything BELOW folder_name.
           #
-          # POC-001/POC-001/...
+          # Example:
           #
-          # Everything BELOW the approved folder is captured and
-          # reconstructed under the corresponding FVP folder.
+          # clone/CW36/(**)
+          #
+          # ->
+          #
+          # FVP/CW36/{1}
+          #
+          # This avoids:
+          #
+          # FVP/CW36/CW36/...
           $copySourcePattern = "$sourceRoot/(**)"
 
           $copyTargetPattern = "$targetRoot/{1}"
 
 
-          Write-Host ''
-
-          Write-Host '========================================'
-
-          Write-Host 'APPROVED FVP PROMOTION PLAN'
-
-          Write-Host '========================================'
-
-
           Write-Host 'Folder:'
-
           Write-Host $folderName
 
 
-          Write-Host 'Scout Clone source:'
-
+          Write-Host 'Source:'
           Write-Host $sourceRoot
 
 
-          Write-Host 'FVP destination:'
-
+          Write-Host 'Target:'
           Write-Host $targetRoot
 
 
-          Write-Host 'Source search pattern:'
-
-          Write-Host $sourceSearchPattern
-
-
           Write-Host 'Copy source pattern:'
-
           Write-Host $copySourcePattern
 
 
           Write-Host 'Copy target pattern:'
-
           Write-Host $copyTargetPattern
 
 
@@ -477,7 +373,7 @@ jobs:
 
 
       # ==========================================================
-      # 9. VERIFY APPROVED SOURCE EXISTS IN SCOUT CLONE
+      # 9. VERIFY SOURCE
       # ==========================================================
 
       - name: Verify Scout Clone Source
@@ -489,11 +385,10 @@ jobs:
           SOURCE_PATTERN: ${{ steps.paths.outputs.source_search_pattern }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
-          Write-Host 'Verifying Scout Clone source:'
+          Write-Host 'Verifying Scout Clone:'
 
           Write-Host $env:SOURCE_PATTERN
 
@@ -507,20 +402,12 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'Approved Scout Clone folder contains no artifacts.'
-
           }
 
 
-          Write-Host 'Scout Clone source verified.'
-
-
       # ==========================================================
-      # 10. DRY RUN COPY
-      #
-      # JFrog placeholders explicitly map the hierarchy beneath
-      # the approved folder into the corresponding FVP folder.
+      # 10. PREVIEW COPY
       # ==========================================================
 
       - name: Preview Scout to FVP Copy
@@ -534,17 +421,10 @@ jobs:
           COPY_TARGET_PATTERN: ${{ steps.paths.outputs.copy_target_pattern }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
-          Write-Host ''
-
-          Write-Host '========================================'
-
           Write-Host 'FVP COPY DRY RUN'
-
-          Write-Host '========================================'
 
 
           Write-Host 'FROM:'
@@ -567,21 +447,16 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'Scout to FVP copy dry run failed.'
-
           }
 
 
-          Write-Host 'FVP copy preview completed.'
-
-
       # ==========================================================
-      # 11. COPY APPROVED FOLDER TO FVP
+      # 11. COPY TO FVP
       #
-      # COPY, NOT MOVE.
+      # COPY, not MOVE.
       #
-      # Scout Clone remains after this operation.
+      # Scout Clone remains.
       # ==========================================================
 
       - name: Copy Approved Folder to FVP
@@ -595,17 +470,10 @@ jobs:
           COPY_TARGET_PATTERN: ${{ steps.paths.outputs.copy_target_pattern }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
-          Write-Host ''
-
-          Write-Host '========================================'
-
           Write-Host 'COPYING APPROVED FOLDER TO FVP'
-
-          Write-Host '========================================'
 
 
           Write-Host 'FROM:'
@@ -628,9 +496,7 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'Scout to FVP artifact copy failed.'
-
           }
 
 
@@ -650,14 +516,13 @@ jobs:
           TARGET_ROOT: ${{ steps.paths.outputs.target_root }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
           $targetPattern = "$env:TARGET_ROOT/*"
 
 
-          Write-Host 'Verifying FVP destination:'
+          Write-Host 'Verifying FVP:'
 
           Write-Host $targetPattern
 
@@ -671,20 +536,12 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'FVP verification failed.'
-
           }
 
 
-          Write-Host 'FVP destination verified.'
-
-
       # ==========================================================
-      # 13. VERIFY CLONE STILL EXISTS
-      #
-      # The approved operation is a COPY. Verify the original
-      # Scout Clone folder was not removed.
+      # 13. VERIFY CLONE REMAINS
       # ==========================================================
 
       - name: Verify Scout Clone Remains
@@ -696,16 +553,10 @@ jobs:
           SOURCE_ROOT: ${{ steps.paths.outputs.source_root }}
 
         run: |
-
           $ErrorActionPreference = 'Stop'
 
 
           $sourcePattern = "$env:SOURCE_ROOT/*"
-
-
-          Write-Host 'Verifying Scout Clone still exists:'
-
-          Write-Host $sourcePattern
 
 
           jf rt search `
@@ -717,9 +568,7 @@ jobs:
 
 
           if ($LASTEXITCODE -ne 0) {
-
               throw 'Scout Clone source is missing after FVP copy.'
-
           }
 
 
@@ -745,17 +594,13 @@ jobs:
           TARGET_ROOT: ${{ steps.paths.outputs.target_root }}
 
         run: |
-
           Write-Host ''
-
           Write-Host '========================================'
-
           Write-Host 'FVP PROMOTION SUCCESSFUL'
-
           Write-Host '========================================'
 
 
-          Write-Host 'Approved folder:'
+          Write-Host 'Folder:'
 
           Write-Host $env:FOLDER_NAME
 
@@ -765,25 +610,20 @@ jobs:
           Write-Host $env:SOURCE_ROOT
 
 
-          Write-Host 'FVP destination:'
+          Write-Host 'FVP:'
 
           Write-Host $env:TARGET_ROOT
 
 
-          Write-Host ''
-
           Write-Host 'Scout Clone status:'
-
           Write-Host 'AVAILABLE'
 
 
           Write-Host 'FVP status:'
-
           Write-Host 'PUBLISHED'
 
 
           Write-Host 'Operation:'
-
           Write-Host 'COPY'
 
 
@@ -800,10 +640,6 @@ jobs:
         continue-on-error: true
 
         run: |
-
-          jf c rm `
-              "$env:SCOUT_SERVER_ID" `
-              --quiet
-
+          jf c rm "$env:SCOUT_SERVER_ID" --quiet
 
           Write-Host 'Scout JFrog configuration removed.'
