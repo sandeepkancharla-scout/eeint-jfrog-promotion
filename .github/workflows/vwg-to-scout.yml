@@ -30,7 +30,7 @@ jobs:
       - self-hosted
       - Windows
 
-    timeout-minutes: 120
+    timeout-minutes: 10
 
     env:
       SOURCE_SERVER_ID: vwg-source
