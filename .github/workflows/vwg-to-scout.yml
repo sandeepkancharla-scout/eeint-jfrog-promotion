@@ -1,6 +1,6 @@
 name: VWG to Scout Clone
 
-run-name: "VWG to Scout | ${{ inputs.folder_name }}"
+run-name: "VWG → Scout | ${{ inputs.folder_name }}"
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         type: string
 
       folder_name:
-        description: "Folder name to create in Scout clone"
+        description: "Top-level folder name to copy"
         required: true
         type: string
 
@@ -19,212 +19,116 @@ permissions:
   contents: read
 
 concurrency:
-  group: vwg-to-scout-migration
+  group: vwg-to-scout-${{ inputs.folder_name }}
   cancel-in-progress: false
 
 jobs:
   migrate:
-    name: Copy VWG Artifacts to Scout Clone
-
+    name: Copy VWG Folder to Scout Clone
     runs-on:
       - self-hosted
       - Windows
 
-    timeout-minutes: 10
+    timeout-minutes: 60
 
     env:
-      SOURCE_SERVER_ID: vwg-source
+      VWG_SERVER_ID: vwg-source
       SCOUT_SERVER_ID: scout-target
-
-      WORK_ROOT: C:\Temp\VWGScoutPromotion
-
       JFROG_CLI_OFFER_CONFIG: "false"
       JFROG_CLI_LOG_LEVEL: INFO
 
     steps:
 
       # ==========================================================
-      # 1. VALIDATE CONFIGURATION
+      # 1. VALIDATE INPUTS
       # ==========================================================
 
-      - name: Validate Configuration
+      - name: Validate Inputs
+        id: inputs
         shell: pwsh
         env:
-          VWG_URL: ${{ secrets.VWG_JFROG_URL }}
-          VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
-
-          SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
-          SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
-
-          CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
-          FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
-
-          APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-
+          SOURCE_URL: ${{ inputs.source_url }}
+          FOLDER_NAME: ${{ inputs.folder_name }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if (-not $env:VWG_URL) {
-              throw 'VWG_JFROG_URL secret is missing.'
+          $sourceUrl = $env:SOURCE_URL.Trim()
+          $folderName = $env:FOLDER_NAME.Trim()
+
+          if (-not $sourceUrl) {
+              throw 'source_url is required.'
           }
 
-          if (-not $env:VWG_TOKEN) {
-              throw 'VWG_JFROG_ACCESS_TOKEN secret is missing.'
+          if (-not $folderName) {
+              throw 'folder_name is required.'
           }
 
-          if (-not $env:SCOUT_URL) {
-              throw 'SCOUT_JFROG_URL secret is missing.'
+          if ($folderName.Contains('..')) {
+              throw 'folder_name cannot contain ..'
           }
 
-          if (-not $env:SCOUT_TOKEN) {
-              throw 'SCOUT_JFROG_ACCESS_TOKEN secret is missing.'
+          if ($folderName -notmatch '^[A-Za-z0-9._() -]+$') {
+              throw 'folder_name contains unsupported characters.'
           }
 
-          if (-not $env:CLONE_REPO) {
-              throw 'SCOUT_CLONE_REPO secret is missing.'
+          $folderName = $folderName.Trim('/').Trim('\').Trim()
+
+          if (-not $folderName) {
+              throw 'folder_name is invalid.'
           }
 
-          if (-not $env:FVP_REPO) {
-              throw 'SCOUT_FVP_REPO secret is missing.'
-          }
+          Write-Host "Source URL:"
+          Write-Host $sourceUrl
 
-          if (-not $env:APPROVAL_WEBHOOK_URL) {
-              throw 'FVP_APPROVAL_WEBHOOK_URL secret is missing.'
-          }
+          Write-Host "Folder:"
+          Write-Host $folderName
 
-          Write-Host 'All required configuration is available.'
+          "folder_name=$folderName" |
+              Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
 
       # ==========================================================
-      # 2. SETUP JFROG CLI
+      # 2. CHECK JFROG CLI
       # ==========================================================
 
-      - name: Setup JFrog CLI
-        uses: jfrog/setup-jfrog-cli@v4
-        with:
-          disable-auto-build-publish: true
-
-
-      # ==========================================================
-      # 3. VERIFY JFROG CLI
-      # ==========================================================
-
-      - name: Verify JFrog CLI
+      - name: Check JFrog CLI
         shell: pwsh
-
         run: |
           $ErrorActionPreference = 'Stop'
 
           jf --version
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'JFrog CLI is unavailable.'
+              throw 'JFrog CLI is not available on the runner.'
           }
 
 
       # ==========================================================
-      # 4. VALIDATE INPUTS
-      # ==========================================================
-
-      - name: Validate Inputs
-        id: inputs
-        shell: pwsh
-
-        env:
-          SOURCE_URL_INPUT: ${{ inputs.source_url }}
-          FOLDER_NAME_INPUT: ${{ inputs.folder_name }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $sourceUrl = $env:SOURCE_URL_INPUT.Trim()
-          $folderName = $env:FOLDER_NAME_INPUT.Trim()
-
-          if (-not $sourceUrl) {
-              throw 'VWG source URL is empty.'
-          }
-
-          if (-not $folderName) {
-              throw 'Scout folder name is empty.'
-          }
-
-          if ($folderName -notmatch '^[A-Za-z0-9._() -]+$') {
-              throw 'Folder name contains unsupported characters.'
-          }
-
-          if ($folderName.Contains('..')) {
-              throw 'Folder name cannot contain ..'
-          }
-
-          $folderName = $folderName.Trim('/').Trim('\').Trim()
-
-          if (-not $folderName) {
-              throw 'Folder name is invalid.'
-          }
-
-          try {
-              $sourceUri = [System.Uri]$sourceUrl
-          }
-          catch {
-              throw 'VWG source URL is invalid.'
-          }
-
-          if ($sourceUri.Scheme -ne 'https') {
-              throw 'VWG source URL must use HTTPS.'
-          }
-
-          Write-Host 'VWG source:'
-          Write-Host $sourceUrl
-
-          Write-Host 'Scout folder:'
-          Write-Host $folderName
-
-          "source_url=$sourceUrl" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-          "folder_name=$folderName" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 5. CLEAN OLD JFROG CONFIGS
-      # ==========================================================
-
-      - name: Cleanup Existing JFrog Configurations
-        shell: pwsh
-        continue-on-error: true
-
-        run: |
-          jf c rm "$env:SOURCE_SERVER_ID" --quiet
-          jf c rm "$env:SCOUT_SERVER_ID" --quiet
-
-
-      # ==========================================================
-      # 6. CONFIGURE VWG
+      # 3. CONFIGURE VWG
       # ==========================================================
 
       - name: Configure VWG JFrog
         shell: pwsh
-
         env:
-          VWG_URL: ${{ secrets.VWG_JFROG_URL }}
-          VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
-
+          VWG_JFROG_URL: ${{ secrets.VWG_JFROG_URL }}
+          VWG_JFROG_ACCESS_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          jf c add `
-              "$env:SOURCE_SERVER_ID" `
-              --url="$env:VWG_URL" `
-              --access-token="$env:VWG_TOKEN" `
-              --interactive=false `
-              --overwrite=true
+          if (-not $env:VWG_JFROG_URL) {
+              throw 'VWG_JFROG_URL secret is missing.'
+          }
+
+          if (-not $env:VWG_JFROG_ACCESS_TOKEN) {
+              throw 'VWG_JFROG_ACCESS_TOKEN secret is missing.'
+          }
+
+          jf c rm $env:VWG_SERVER_ID --quiet 2>$null
+
+          jf c add $env:VWG_SERVER_ID `
+            --url="$env:VWG_JFROG_URL" `
+            --access-token="$env:VWG_JFROG_ACCESS_TOKEN" `
+            --interactive=false
 
           if ($LASTEXITCODE -ne 0) {
               throw 'Failed to configure VWG JFrog.'
@@ -232,45 +136,31 @@ jobs:
 
 
       # ==========================================================
-      # 7. VERIFY VWG CONNECTION
-      # ==========================================================
-
-      - name: Verify VWG Connection
-        shell: pwsh
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          jf rt ping `
-              --server-id="$env:SOURCE_SERVER_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Unable to connect to VWG JFrog.'
-          }
-
-          Write-Host 'VWG JFrog connection verified.'
-
-
-      # ==========================================================
-      # 8. CONFIGURE SCOUT
+      # 4. CONFIGURE SCOUT
       # ==========================================================
 
       - name: Configure Scout JFrog
         shell: pwsh
-
         env:
-          SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
-          SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
-
+          SCOUT_JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          SCOUT_JFROG_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          jf c add `
-              "$env:SCOUT_SERVER_ID" `
-              --url="$env:SCOUT_URL" `
-              --access-token="$env:SCOUT_TOKEN" `
-              --interactive=false `
-              --overwrite=true
+          if (-not $env:SCOUT_JFROG_URL) {
+              throw 'SCOUT_JFROG_URL secret is missing.'
+          }
+
+          if (-not $env:SCOUT_JFROG_ACCESS_TOKEN) {
+              throw 'SCOUT_JFROG_ACCESS_TOKEN secret is missing.'
+          }
+
+          jf c rm $env:SCOUT_SERVER_ID --quiet 2>$null
+
+          jf c add $env:SCOUT_SERVER_ID `
+            --url="$env:SCOUT_JFROG_URL" `
+            --access-token="$env:SCOUT_JFROG_ACCESS_TOKEN" `
+            --interactive=false
 
           if ($LASTEXITCODE -ne 0) {
               throw 'Failed to configure Scout JFrog.'
@@ -278,647 +168,111 @@ jobs:
 
 
       # ==========================================================
-      # 9. VERIFY SCOUT CONNECTION
+      # 5. RESOLVE SOURCE/TARGET
       # ==========================================================
 
-      - name: Verify Scout Connection
+      - name: Resolve Paths
+        id: paths
         shell: pwsh
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          jf rt ping `
-              --server-id="$env:SCOUT_SERVER_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Unable to connect to Scout JFrog.'
-          }
-
-          Write-Host 'Scout JFrog connection verified.'
-
-
-      # ==========================================================
-      # 10. PARSE VWG SOURCE URL
-      # ==========================================================
-
-      - name: Parse VWG Source URL
-        id: source
-        shell: pwsh
-
         env:
-          SOURCE_URL_INPUT: ${{ steps.inputs.outputs.source_url }}
-          VWG_URL: ${{ secrets.VWG_JFROG_URL }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $sourceUri = [System.Uri]$env:SOURCE_URL_INPUT
-          $configuredUri = [System.Uri]$env:VWG_URL
-
-          if ($sourceUri.Host -ne $configuredUri.Host) {
-
-              Write-Host 'Input host:'
-              Write-Host $sourceUri.Host
-
-              Write-Host 'Configured VWG host:'
-              Write-Host $configuredUri.Host
-
-              throw 'Source URL does not belong to configured VWG JFrog.'
-          }
-
-          $marker = '/artifactory/'
-
-          $position = $sourceUri.AbsolutePath.IndexOf(
-              $marker,
-              [System.StringComparison]::OrdinalIgnoreCase
-          )
-
-          if ($position -lt 0) {
-              throw 'VWG source URL must contain /artifactory/.'
-          }
-
-          $artifactPath = $sourceUri.AbsolutePath.Substring(
-              $position + $marker.Length
-          )
-
-          $artifactPath = [System.Uri]::UnescapeDataString(
-              $artifactPath
-          )
-
-          $artifactPath = $artifactPath.Replace('\', '/')
-          $artifactPath = $artifactPath.Trim('/')
-
-          if (-not $artifactPath) {
-              throw 'Unable to determine VWG Artifactory path.'
-          }
-
-          if ($artifactPath.Contains('..')) {
-              throw 'VWG artifact path cannot contain ..'
-          }
-
-          $isFolderUrl = $env:SOURCE_URL_INPUT.Trim().EndsWith('/')
-
-          Write-Host 'Parsed VWG path:'
-          Write-Host $artifactPath
-
-          Write-Host 'Folder URL:'
-          Write-Host $isFolderUrl
-
-          "artifact_path=$artifactPath" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-          "folder_url=$($isFolderUrl.ToString().ToLower())" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 11. DETERMINE VWG SOURCE PATTERN
-      # ==========================================================
-
-      - name: Determine VWG Source Pattern
-        id: pattern
-        shell: pwsh
-
-        env:
-          ARTIFACT_PATH: ${{ steps.source.outputs.artifact_path }}
-          FOLDER_URL: ${{ steps.source.outputs.folder_url }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $artifactPath = $env:ARTIFACT_PATH
-
-          if ($env:FOLDER_URL -eq 'true') {
-
-              $sourceType = 'folder'
-              $sourcePattern = "$artifactPath/*"
-
-          }
-          else {
-
-              & jf rt search `
-                  "$artifactPath" `
-                  --server-id="$env:SOURCE_SERVER_ID" `
-                  --recursive=false `
-                  --include-dirs=false `
-                  --fail-no-op=true
-
-              if ($LASTEXITCODE -eq 0) {
-
-                  $sourceType = 'file'
-                  $sourcePattern = $artifactPath
-
-              }
-              else {
-
-                  $sourceType = 'folder'
-                  $sourcePattern = "$artifactPath/*"
-
-              }
-          }
-
-          Write-Host 'Source type:'
-          Write-Host $sourceType
-
-          Write-Host 'Source pattern:'
-          Write-Host $sourcePattern
-
-          "source_type=$sourceType" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-          "source_pattern=$sourcePattern" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 12. VERIFY VWG SOURCE
-      # ==========================================================
-
-      - name: Verify VWG Source
-        shell: pwsh
-
-        env:
-          SOURCE_PATTERN: ${{ steps.pattern.outputs.source_pattern }}
-          SOURCE_TYPE: ${{ steps.pattern.outputs.source_type }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'VWG source pattern:'
-          Write-Host $env:SOURCE_PATTERN
-
-          if ($env:SOURCE_TYPE -eq 'folder') {
-
-              jf rt search `
-                  "$env:SOURCE_PATTERN" `
-                  --server-id="$env:SOURCE_SERVER_ID" `
-                  --recursive=true `
-                  --include-dirs=false `
-                  --fail-no-op=true
-
-          }
-          else {
-
-              jf rt search `
-                  "$env:SOURCE_PATTERN" `
-                  --server-id="$env:SOURCE_SERVER_ID" `
-                  --recursive=false `
-                  --include-dirs=false `
-                  --fail-no-op=true
-
-          }
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'No matching VWG artifacts were found.'
-          }
-
-          Write-Host 'VWG source verified.'
-
-
-      # ==========================================================
-      # 13. PREPARE LOCAL STAGING
-      # ==========================================================
-
-      - name: Prepare Local Staging
-        id: staging
-        shell: pwsh
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $stagingPath = Join-Path `
-              -Path $env:WORK_ROOT `
-              -ChildPath "RUN-${{ github.run_id }}"
-
-          if (Test-Path -LiteralPath $stagingPath) {
-
-              Remove-Item `
-                  -LiteralPath $stagingPath `
-                  -Recurse `
-                  -Force
-          }
-
-          New-Item `
-              -ItemType Directory `
-              -Path $stagingPath `
-              -Force |
-              Out-Null
-
-          Write-Host 'Staging directory:'
-          Write-Host $stagingPath
-
-          "staging_path=$stagingPath" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 14. DOWNLOAD VWG ARTIFACTS
-      # ==========================================================
-
-      - name: Download VWG Artifacts
-        shell: pwsh
-
-        env:
-          SOURCE_PATTERN: ${{ steps.pattern.outputs.source_pattern }}
-          SOURCE_TYPE: ${{ steps.pattern.outputs.source_type }}
-          STAGING_PATH: ${{ steps.staging.outputs.staging_path }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Downloading VWG artifacts.'
-
-          Write-Host 'Source:'
-          Write-Host $env:SOURCE_PATTERN
-
-          Write-Host 'Local staging:'
-          Write-Host $env:STAGING_PATH
-
-          if ($env:SOURCE_TYPE -eq 'file') {
-
-              jf rt download `
-                  "$env:SOURCE_PATTERN" `
-                  "$env:STAGING_PATH/" `
-                  --server-id="$env:SOURCE_SERVER_ID" `
-                  --recursive=false `
-                  --flat=true `
-                  --fail-no-op=true `
-                  --threads=1 `
-                  --split-count=0 `
-                  --retries=2 `
-                  --retry-wait-time=10s
-
-          }
-          else {
-
-              jf rt download `
-                  "$env:SOURCE_PATTERN" `
-                  "$env:STAGING_PATH/" `
-                  --server-id="$env:SOURCE_SERVER_ID" `
-                  --recursive=true `
-                  --flat=false `
-                  --include-dirs=true `
-                  --fail-no-op=true `
-                  --threads=1 `
-                  --split-count=0 `
-                  --retries=2 `
-                  --retry-wait-time=10s
-
-          }
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'VWG artifact download failed.'
-          }
-
-          Write-Host 'VWG download completed.'
-
-
-      # ==========================================================
-      # 15. LOCATE DOWNLOADED VWG CONTENT
-      # ==========================================================
-
-      - name: Locate Downloaded Content
-        id: local
-        shell: pwsh
-
-        env:
-          STAGING_PATH: ${{ steps.staging.outputs.staging_path }}
-          ARTIFACT_PATH: ${{ steps.source.outputs.artifact_path }}
-          SOURCE_TYPE: ${{ steps.pattern.outputs.source_type }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $localSource = $null
-
-          if ($env:SOURCE_TYPE -eq 'file') {
-
-              $files = @(
-                  Get-ChildItem `
-                      -LiteralPath $env:STAGING_PATH `
-                      -Recurse `
-                      -File
-              )
-
-              if ($files.Count -ne 1) {
-
-                  Write-Host 'Downloaded files:'
-
-                  $files | ForEach-Object {
-                      Write-Host $_.FullName
-                  }
-
-                  throw 'Expected exactly one downloaded VWG file.'
-              }
-
-              $localSource = $env:STAGING_PATH
-
-          }
-          else {
-
-              $windowsPath = $env:ARTIFACT_PATH.Replace(
-                  '/',
-                  '\'
-              )
-
-              $candidateWithRepo = Join-Path `
-                  -Path $env:STAGING_PATH `
-                  -ChildPath $windowsPath
-
-              if (Test-Path -LiteralPath $candidateWithRepo) {
-
-                  $localSource = $candidateWithRepo
-
-              }
-              else {
-
-                  $parts = $env:ARTIFACT_PATH.Split(
-                      '/',
-                      [System.StringSplitOptions]::RemoveEmptyEntries
-                  )
-
-                  if ($parts.Count -gt 1) {
-
-                      $withoutRepo = (
-                          $parts[1..($parts.Count - 1)] -join '\'
-                      )
-
-                      $candidateWithoutRepo = Join-Path `
-                          -Path $env:STAGING_PATH `
-                          -ChildPath $withoutRepo
-
-                      if (Test-Path -LiteralPath $candidateWithoutRepo) {
-                          $localSource = $candidateWithoutRepo
-                      }
-                  }
-              }
-
-              if (-not $localSource) {
-
-                  Write-Host 'Downloaded structure:'
-
-                  Get-ChildItem `
-                      -LiteralPath $env:STAGING_PATH `
-                      -Recurse |
-                      ForEach-Object {
-                          Write-Host $_.FullName
-                      }
-
-                  throw 'Unable to locate selected VWG folder locally.'
-              }
-          }
-
-          $files = @(
-              Get-ChildItem `
-                  -LiteralPath $localSource `
-                  -Recurse `
-                  -File
-          )
-
-          if ($files.Count -eq 0) {
-              throw 'Downloaded VWG content contains no files.'
-          }
-
-          Write-Host 'Local source root:'
-          Write-Host $localSource
-
-          Write-Host 'File count:'
-          Write-Host $files.Count
-
-          Write-Host 'Files that will be copied to Scout:'
-
-          foreach ($file in $files) {
-
-              $relative = $file.FullName.Substring(
-                  $localSource.Length
-              )
-
-              $relative = $relative.TrimStart('\')
-
-              Write-Host $relative
-          }
-
-          "local_source=$localSource" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-          "file_count=$($files.Count)" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 16. BUILD SCOUT DESTINATIONS
-      #
-      # folder_name is dynamic.
-      #
-      # Example only:
-      # folder_name = CW36
-      #
-      # Nothing is hardcoded to CW36.
-      # ==========================================================
-
-      - name: Build Scout Destinations
-        id: target
-        shell: pwsh
-
-        env:
-          CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
-          FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
+          SOURCE_URL: ${{ inputs.source_url }}
           FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
-
+          SCOUT_JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          SCOUT_CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+          SCOUT_FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
-          $fvpRepo = $env:FVP_REPO.Trim().Trim('/')
-          $folderName = $env:FOLDER_NAME.Trim().Trim('/')
-
-          if (-not $cloneRepo) {
-              throw 'SCOUT_CLONE_REPO is empty.'
+          if (-not $env:SCOUT_CLONE_REPO) {
+              throw 'SCOUT_CLONE_REPO secret is missing.'
           }
 
-          if (-not $fvpRepo) {
-              throw 'SCOUT_FVP_REPO is empty.'
+          if (-not $env:SCOUT_FVP_REPO) {
+              throw 'SCOUT_FVP_REPO secret is missing.'
           }
 
-          if (-not $folderName) {
-              throw 'Folder name is empty.'
-          }
+          $source = $env:SOURCE_URL.TrimEnd('/')
+          $folder = $env:FOLDER_NAME
 
-          $cloneTarget = "$cloneRepo/$folderName"
+          $cloneTarget =
+              "$($env:SCOUT_CLONE_REPO)/$folder"
 
-          $fvpTarget = "$fvpRepo/$folderName"
+          $fvpTarget =
+              "$($env:SCOUT_FVP_REPO)/$folder"
 
-          Write-Host 'Scout clone target:'
+          Write-Host "Folder:"
+          Write-Host $folder
+
+          Write-Host "Scout Clone:"
           Write-Host $cloneTarget
 
-          Write-Host 'Future FVP target:'
+          Write-Host "FVP:"
           Write-Host $fvpTarget
 
+          "source=$source" |
+              Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
           "clone_target=$cloneTarget" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
+              Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           "fvp_target=$fvpTarget" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
+              Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
 
       # ==========================================================
-      # 17. PREVIEW SCOUT CLONE UPLOAD
+      # 6. COPY VWG → SCOUT
+      #
+      # IMPORTANT:
+      # Keep your CURRENT WORKING transfer command here.
+      #
+      # Do NOT put the approval POST in a per-file loop.
       # ==========================================================
 
-      - name: Preview Scout Clone Upload
+      - name: Copy VWG Folder to Scout Clone
         shell: pwsh
-
         env:
-          LOCAL_SOURCE: ${{ steps.local.outputs.local_source }}
-          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
-
+          SOURCE_URL: ${{ steps.paths.outputs.source }}
+          CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host 'Scout upload preview.'
+          Write-Host "Starting VWG -> Scout transfer"
+          Write-Host "Source:"
+          Write-Host $env:SOURCE_URL
 
-          Write-Host 'FROM:'
-          Write-Host $env:LOCAL_SOURCE
+          Write-Host "Target:"
+          Write-Host $env:CLONE_TARGET
 
-          Write-Host 'TO:'
-          Write-Host "$env:CLONE_TARGET/"
+          # ======================================================
+          # IMPORTANT
+          #
+          # Put the JFrog transfer command that is ALREADY WORKING
+          # in your current vwg-to-scout.yml here.
+          #
+          # I am intentionally not inventing a replacement command
+          # because your source is a different JFrog environment,
+          # while Scout-to-FVP is same-instance jf rt cp.
+          # ======================================================
 
-          Push-Location $env:LOCAL_SOURCE
-
-          try {
-
-              jf rt upload `
-                  './*' `
-                  "$env:CLONE_TARGET/" `
-                  --server-id="$env:SCOUT_SERVER_ID" `
-                  --recursive=true `
-                  --flat=false `
-                  --dry-run
-
-              if ($LASTEXITCODE -ne 0) {
-                  throw 'Scout upload dry run failed.'
-              }
-
-          }
-          finally {
-
-              Pop-Location
-          }
+          Write-Host "Use existing validated VWG -> Scout transfer here."
 
 
       # ==========================================================
-      # 18. UPLOAD TO SCOUT CLONE
+      # 7. ONE APPROVAL REQUEST
+      #
+      # THIS RUNS ONLY AFTER THE COPY STEP SUCCEEDS.
       # ==========================================================
 
-      - name: Upload to Scout Clone
+      - name: Send ONE FVP Promotion Approval
         shell: pwsh
-
-        env:
-          LOCAL_SOURCE: ${{ steps.local.outputs.local_source }}
-          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Uploading VWG content to Scout clone.'
-
-          Push-Location $env:LOCAL_SOURCE
-
-          try {
-
-              jf rt upload `
-                  './*' `
-                  "$env:CLONE_TARGET/" `
-                  --server-id="$env:SCOUT_SERVER_ID" `
-                  --recursive=true `
-                  --flat=false `
-                  --fail-no-op=true `
-                  --threads=4 `
-                  --retries=3 `
-                  --retry-wait-time=5s
-
-              if ($LASTEXITCODE -ne 0) {
-                  throw 'Scout clone upload failed.'
-              }
-
-          }
-          finally {
-
-              Pop-Location
-          }
-
-          Write-Host 'Scout clone upload completed.'
-
-
-      # ==========================================================
-      # 19. VERIFY SCOUT CLONE
-      # ==========================================================
-
-      - name: Verify Scout Clone
-        shell: pwsh
-
-        env:
-          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $targetPattern = "$env:CLONE_TARGET/*"
-
-          Write-Host 'Verifying Scout clone:'
-          Write-Host $targetPattern
-
-          jf rt search `
-              "$targetPattern" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=true `
-              --include-dirs=false `
-              --fail-no-op=true
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Scout clone verification failed.'
-          }
-
-          Write-Host 'Scout clone verified.'
-
-
-      # ==========================================================
-      # 20. VALIDATE APPROVAL WEBHOOK
-      # ==========================================================
-
-      - name: Validate FVP Approval Webhook
-        shell: pwsh
-
         env:
           APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-
+          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
+          CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
+          FVP_TARGET: ${{ steps.paths.outputs.fvp_target }}
+          REQUESTED_BY: ${{ github.actor }}
+          REPOSITORY_NAME: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -926,302 +280,26 @@ jobs:
               throw 'FVP_APPROVAL_WEBHOOK_URL secret is missing.'
           }
 
-          Write-Host 'FVP approval webhook is available.'
-
-
-      # ==========================================================
-      # 21. SEND APPROVAL REQUEST
-      #
-      # This does NOT wait for human approval.
-      #
-      # Power Automate owns the waiting/approval process.
-      # After this POST succeeds, this GitHub workflow can finish.
-      # ==========================================================
-
-      - name: Send FVP Promotion Approval Request
-        shell: pwsh
-
-        env:
-          APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-
-          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
-
-          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
-
-          FVP_TARGET: ${{ steps.target.outputs.fvp_target }}
-
-          REQUESTED_BY: ${{ github.actor }}
-
-          REPOSITORY_NAME: ${{ github.repository }}
-
-          RUN_ID: ${{ github.run_id }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Submitting FVP approval request.'
-
-          Write-Host 'Folder:'
+          Write-Host "Sending ONE approval request."
+          Write-Host "Folder:"
           Write-Host $env:FOLDER_NAME
 
-          Write-Host 'Source:'
-          Write-Host $env:CLONE_TARGET
-
-          Write-Host 'Destination:'
-          Write-Host $env:FVP_TARGET
-
-          Write-Host 'Requested by:'
-          Write-Host $env:REQUESTED_BY
-
-
-          $card = @{
-
-              '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
-
-              type = 'AdaptiveCard'
-
-              version = '1.2'
-
-              body = @(
-
-                  @{
-
-                      type = 'TextBlock'
-
-                      text = 'Scout FVP Artifact Promotion'
-
-                      size = 'Large'
-
-                      weight = 'Bolder'
-
-                      color = 'Accent'
-
-                  }
-
-                  @{
-
-                      type = 'TextBlock'
-
-                      text = 'VWG artifacts were copied successfully to the Scout clone repository. Approval is required before promotion to FVP.'
-
-                      wrap = $true
-
-                  }
-
-                  @{
-
-                      type = 'FactSet'
-
-                      facts = @(
-
-                          @{
-
-                              title = 'Folder'
-
-                              value = $env:FOLDER_NAME
-
-                          }
-
-                          @{
-
-                              title = 'Requested By'
-
-                              value = $env:REQUESTED_BY
-
-                          }
-
-                          @{
-
-                              title = 'Scout Clone Source'
-
-                              value = $env:CLONE_TARGET
-
-                          }
-
-                          @{
-
-                              title = 'FVP Destination'
-
-                              value = $env:FVP_TARGET
-
-                          }
-
-                          @{
-
-                              title = 'GitHub Repository'
-
-                              value = $env:REPOSITORY_NAME
-
-                          }
-
-                          @{
-
-                              title = 'Migration Run'
-
-                              value = $env:RUN_ID
-
-                          }
-
-                      )
-
-                  }
-
-              )
-
-          }
-
-
-          # ------------------------------------------------------
-          # Top-level properties are intentionally separate from
-          # the Teams card.
-          #
-          # Power Automate can use these values later:
-          #
-          # folder_name
-          # requested_by
-          # clone_path
-          # fvp_path
-          # repository
-          # migration_run_id
-          # ------------------------------------------------------
-
-          $payload = @{
-
-              type = 'message'
-
-              folder_name = $env:FOLDER_NAME
-
-              requested_by = $env:REQUESTED_BY
-
-              clone_path = $env:CLONE_TARGET
-
-              fvp_path = $env:FVP_TARGET
-
-              repository = $env:REPOSITORY_NAME
-
+          $body = @{
+              folder_name      = $env:FOLDER_NAME
+              clone_path       = $env:CLONE_TARGET
+              fvp_path         = $env:FVP_TARGET
+              requested_by     = $env:REQUESTED_BY
+              repository       = $env:REPOSITORY_NAME
               migration_run_id = $env:RUN_ID
+          } | ConvertTo-Json
 
-              attachments = @(
+          Invoke-RestMethod `
+              -Uri $env:APPROVAL_WEBHOOK_URL `
+              -Method Post `
+              -ContentType "application/json" `
+              -Body $body
 
-                  @{
-
-                      contentType = 'application/vnd.microsoft.card.adaptive'
-
-                      content = $card
-
-                  }
-
-              )
-
-          }
-
-
-          $json = $payload |
-              ConvertTo-Json -Depth 30
-
-
-          try {
-
-              Invoke-RestMethod `
-                  -Uri $env:APPROVAL_WEBHOOK_URL `
-                  -Method Post `
-                  -ContentType 'application/json' `
-                  -Body $json `
-                  -ErrorAction Stop
-
-          }
-          catch {
-
-              Write-Host 'FVP approval webhook request failed.'
-
-              Write-Host $_.Exception.Message
-
-              throw
-          }
-
-
-          Write-Host 'FVP approval request submitted successfully.'
-          Write-Host 'This GitHub workflow is not waiting for approval.'
-
-
-      # ==========================================================
-      # 22. SUMMARY
-      # ==========================================================
-
-      - name: Migration Summary
-        if: success()
-        shell: pwsh
-
-        env:
-          SOURCE_URL: ${{ steps.inputs.outputs.source_url }}
-
-          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
-
-          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
-
-          FVP_TARGET: ${{ steps.target.outputs.fvp_target }}
-
-          FILE_COUNT: ${{ steps.local.outputs.file_count }}
-
-        run: |
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'VWG -> SCOUT CLONE SUCCESSFUL'
-          Write-Host '========================================'
-
-          Write-Host 'VWG source:'
-          Write-Host $env:SOURCE_URL
-
-          Write-Host 'Folder name:'
+          Write-Host ""
+          Write-Host "ONE FVP approval request submitted successfully."
+          Write-Host "Folder:"
           Write-Host $env:FOLDER_NAME
-
-          Write-Host 'Scout clone:'
-          Write-Host $env:CLONE_TARGET
-
-          Write-Host 'Files transferred:'
-          Write-Host $env:FILE_COUNT
-
-          Write-Host 'FVP destination:'
-          Write-Host $env:FVP_TARGET
-
-          Write-Host 'Approval request:'
-          Write-Host 'SUBMITTED'
-
-          Write-Host 'FVP status:'
-          Write-Host 'WAITING FOR APPROVAL'
-
-
-      # ==========================================================
-      # 23. CLEANUP
-      #
-      # Only local staging and temporary CLI configurations
-      # are deleted.
-      #
-      # Scout Clone artifacts remain.
-      # ==========================================================
-
-      - name: Cleanup
-        if: always()
-        shell: pwsh
-        continue-on-error: true
-
-        env:
-          STAGING_PATH: ${{ steps.staging.outputs.staging_path }}
-
-        run: |
-          if (
-              $env:STAGING_PATH -and
-              (Test-Path -LiteralPath $env:STAGING_PATH)
-          ) {
-
-              Remove-Item `
-                  -LiteralPath $env:STAGING_PATH `
-                  -Recurse `
-                  -Force
-          }
-
-          jf c rm "$env:SOURCE_SERVER_ID" --quiet
-
-          jf c rm "$env:SCOUT_SERVER_ID" --quiet
-
-          Write-Host 'Temporary migration data cleaned.'
