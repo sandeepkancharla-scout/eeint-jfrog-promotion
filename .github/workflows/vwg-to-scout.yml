@@ -1,6 +1,6 @@
 name: VWG to Scout Clone
 
-run-name: "VWG → Scout | ${{ inputs.folder_name }}"
+run-name: "VWG to Scout | ${{ inputs.folder_name }}"
 
 on:
   workflow_dispatch:
@@ -25,6 +25,7 @@ concurrency:
 jobs:
   migrate:
     name: Copy VWG Folder to Scout Clone
+
     runs-on:
       - self-hosted
       - Windows
@@ -80,6 +81,7 @@ jobs:
           Write-Host "Source URL:"
           Write-Host $sourceUrl
 
+          Write-Host ""
           Write-Host "Folder:"
           Write-Host $folderName
 
@@ -88,23 +90,36 @@ jobs:
 
 
       # ==========================================================
-      # 2. CHECK JFROG CLI
+      # 2. SETUP JFROG CLI
       # ==========================================================
 
-      - name: Check JFrog CLI
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+
+
+      # ==========================================================
+      # 3. VERIFY JFROG CLI
+      # ==========================================================
+
+      - name: Verify JFrog CLI
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
+          Write-Host "JFrog CLI location:"
+          Get-Command jf
+
+          Write-Host ""
+          Write-Host "JFrog CLI version:"
           jf --version
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'JFrog CLI is not available on the runner.'
+              throw 'JFrog CLI validation failed.'
           }
 
 
       # ==========================================================
-      # 3. CONFIGURE VWG
+      # 4. CONFIGURE VWG JFROG
       # ==========================================================
 
       - name: Configure VWG JFrog
@@ -134,9 +149,11 @@ jobs:
               throw 'Failed to configure VWG JFrog.'
           }
 
+          Write-Host "VWG JFrog configuration created."
+
 
       # ==========================================================
-      # 4. CONFIGURE SCOUT
+      # 5. CONFIGURE SCOUT JFROG
       # ==========================================================
 
       - name: Configure Scout JFrog
@@ -166,9 +183,11 @@ jobs:
               throw 'Failed to configure Scout JFrog.'
           }
 
+          Write-Host "Scout JFrog configuration created."
+
 
       # ==========================================================
-      # 5. RESOLVE SOURCE/TARGET
+      # 6. RESOLVE TARGET PATHS
       # ==========================================================
 
       - name: Resolve Paths
@@ -177,7 +196,6 @@ jobs:
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
-          SCOUT_JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
           SCOUT_CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
           SCOUT_FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
         run: |
@@ -200,13 +218,19 @@ jobs:
           $fvpTarget =
               "$($env:SCOUT_FVP_REPO)/$folder"
 
+          Write-Host "VWG source:"
+          Write-Host $source
+
+          Write-Host ""
           Write-Host "Folder:"
           Write-Host $folder
 
-          Write-Host "Scout Clone:"
+          Write-Host ""
+          Write-Host "Scout Clone target:"
           Write-Host $cloneTarget
 
-          Write-Host "FVP:"
+          Write-Host ""
+          Write-Host "FVP target:"
           Write-Host $fvpTarget
 
           "source=$source" |
@@ -220,47 +244,97 @@ jobs:
 
 
       # ==========================================================
-      # 6. COPY VWG → SCOUT
+      # 7. VWG -> SCOUT COPY
+      # ==========================================================
       #
       # IMPORTANT:
-      # Keep your CURRENT WORKING transfer command here.
       #
-      # Do NOT put the approval POST in a per-file loop.
+      # Put your EXISTING WORKING VWG -> Scout transfer commands
+      # inside this step.
+      #
+      # Do NOT send the approval from inside a per-file loop.
+      #
+      # Everything must finish first.
+      #
       # ==========================================================
 
       - name: Copy VWG Folder to Scout Clone
         shell: pwsh
         env:
           SOURCE_URL: ${{ steps.paths.outputs.source }}
+          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
+          CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
+          VWG_JFROG_URL: ${{ secrets.VWG_JFROG_URL }}
+          VWG_JFROG_ACCESS_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
+          SCOUT_JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          SCOUT_JFROG_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "=================================="
+          Write-Host " VWG -> SCOUT COPY"
+          Write-Host "=================================="
+
+          Write-Host "Source:"
+          Write-Host $env:SOURCE_URL
+
+          Write-Host ""
+
+          Write-Host "Destination:"
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ""
+
+          # ======================================================
+          # PASTE YOUR EXISTING WORKING VWG -> SCOUT TRANSFER
+          # COMMANDS HERE.
+          #
+          # Do NOT put Invoke-RestMethod for Power Automate here.
+          # ======================================================
+
+          Write-Host "VWG -> Scout transfer block goes here."
+
+
+      # ==========================================================
+      # 8. VERIFY SCOUT CLONE
+      # ==========================================================
+
+      - name: Verify Scout Clone
+        shell: pwsh
+        env:
           CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Starting VWG -> Scout transfer"
-          Write-Host "Source:"
-          Write-Host $env:SOURCE_URL
-
-          Write-Host "Target:"
+          Write-Host "Verifying Scout Clone:"
           Write-Host $env:CLONE_TARGET
 
-          # ======================================================
-          # IMPORTANT
-          #
-          # Put the JFrog transfer command that is ALREADY WORKING
-          # in your current vwg-to-scout.yml here.
-          #
-          # I am intentionally not inventing a replacement command
-          # because your source is a different JFrog environment,
-          # while Scout-to-FVP is same-instance jf rt cp.
-          # ======================================================
+          jf rt s "$env:CLONE_TARGET/**" `
+            --server-id=$env:SCOUT_SERVER_ID
 
-          Write-Host "Use existing validated VWG -> Scout transfer here."
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to verify Scout Clone.'
+          }
+
+          Write-Host ""
+          Write-Host "Scout Clone verification completed."
 
 
       # ==========================================================
-      # 7. ONE APPROVAL REQUEST
+      # 9. SEND EXACTLY ONE APPROVAL REQUEST
+      # ==========================================================
       #
-      # THIS RUNS ONLY AFTER THE COPY STEP SUCCEEDS.
+      # IMPORTANT:
+      #
+      # This is intentionally AFTER:
+      #
+      #   VWG -> Scout copy
+      #          AND
+      #   Scout Clone verification
+      #
+      # Therefore the Power Automate webhook is called ONCE
+      # for this workflow execution.
+      #
       # ==========================================================
 
       - name: Send ONE FVP Promotion Approval
@@ -280,26 +354,73 @@ jobs:
               throw 'FVP_APPROVAL_WEBHOOK_URL secret is missing.'
           }
 
-          Write-Host "Sending ONE approval request."
+          Write-Host "=================================="
+          Write-Host " FVP APPROVAL REQUEST"
+          Write-Host "=================================="
+
           Write-Host "Folder:"
           Write-Host $env:FOLDER_NAME
-
-          $body = @{
-              folder_name      = $env:FOLDER_NAME
-              clone_path       = $env:CLONE_TARGET
-              fvp_path         = $env:FVP_TARGET
-              requested_by     = $env:REQUESTED_BY
-              repository       = $env:REPOSITORY_NAME
-              migration_run_id = $env:RUN_ID
-          } | ConvertTo-Json
-
-          Invoke-RestMethod `
-              -Uri $env:APPROVAL_WEBHOOK_URL `
-              -Method Post `
-              -ContentType "application/json" `
-              -Body $body
 
           Write-Host ""
-          Write-Host "ONE FVP approval request submitted successfully."
+
+          Write-Host "Scout Clone:"
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ""
+
+          Write-Host "FVP destination:"
+          Write-Host $env:FVP_TARGET
+
+          $body = @{
+              folder_name       = $env:FOLDER_NAME
+              clone_path        = $env:CLONE_TARGET
+              fvp_path          = $env:FVP_TARGET
+              requested_by      = $env:REQUESTED_BY
+              repository        = $env:REPOSITORY_NAME
+              migration_run_id  = $env:RUN_ID
+          } | ConvertTo-Json
+
+          Write-Host ""
+          Write-Host "Sending ONE request to Power Automate..."
+
+          Invoke-RestMethod `
+            -Uri $env:APPROVAL_WEBHOOK_URL `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $body
+
+          Write-Host ""
+          Write-Host "=================================="
+          Write-Host " ONE APPROVAL REQUEST SENT"
+          Write-Host "=================================="
+
           Write-Host "Folder:"
           Write-Host $env:FOLDER_NAME
+
+
+      # ==========================================================
+      # 10. COMPLETE
+      # ==========================================================
+
+      - name: Migration Complete
+        shell: pwsh
+        env:
+          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
+          CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
+        run: |
+          Write-Host ""
+          Write-Host "=================================="
+          Write-Host " VWG -> SCOUT COMPLETE"
+          Write-Host "=================================="
+
+          Write-Host "Folder:"
+          Write-Host $env:FOLDER_NAME
+
+          Write-Host ""
+
+          Write-Host "Scout Clone:"
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ""
+          Write-Host "Approval request submitted."
+          Write-Host "This GitHub workflow is finished."
