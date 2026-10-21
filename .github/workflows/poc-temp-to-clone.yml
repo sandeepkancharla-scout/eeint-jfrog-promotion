@@ -3,7 +3,6 @@ name: POC - Temp to Scout Clone
 run-name: >-
   POC Temp to Clone |
   ${{ github.event.client_payload.build_type || inputs.build_type }} |
-  ${{ github.event.client_payload.calendar_week || inputs.calendar_week }} |
   ${{ github.event.client_payload.source_path || inputs.source_path }}
 
 on:
@@ -15,7 +14,7 @@ on:
         type: string
 
       build_type:
-        description: "Destination build type"
+        description: "Build classification"
         required: true
         type: choice
         options:
@@ -23,8 +22,8 @@ on:
           - official
 
       calendar_week:
-        description: "Calendar week, for example CW43"
-        required: true
+        description: "Required only for Official builds, for example CW43"
+        required: false
         type: string
 
   repository_dispatch:
@@ -44,10 +43,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate-and-copy:
-    name: Validate inputs and copy to Scout Clone
+  copy-to-clone:
+    name: Copy TEMP artifact to Scout Clone
     runs-on: self-hosted
-
     timeout-minutes: 30
 
     env:
@@ -61,234 +59,443 @@ jobs:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
-      - name: Resolve and validate inputs
-        id: resolve
-        shell: powershell
+      - name: Verify required secrets
+        shell: cmd
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
-          if ("${{ github.event_name }}" -eq "repository_dispatch") {
-              $sourcePath = "${{ github.event.client_payload.source_path }}"
-              $buildType = "${{ github.event.client_payload.build_type }}"
-              $calendarWeek = "${{ github.event.client_payload.calendar_week }}"
-              $requestedBy = "${{ github.event.client_payload.requested_by }}"
-          }
-          else {
-              $sourcePath = "${{ inputs.source_path }}"
-              $buildType = "${{ inputs.build_type }}"
-              $calendarWeek = "${{ inputs.calendar_week }}"
-              $requestedBy = "${{ github.actor }}"
-          }
+          if "%SOURCE_REPO%"=="" (
+            echo ERROR: POC_SOURCE_REPO is missing or empty.
+            exit /b 1
+          )
 
-          $sourcePath = $sourcePath.Trim()
-          $sourcePath = $sourcePath.TrimStart('/')
-          $sourcePath = $sourcePath -replace '\\', '/'
+          if "%CLONE_REPO%"=="" (
+            echo ERROR: SCOUT_CLONE_REPO is missing or empty.
+            exit /b 1
+          )
 
-          $buildType = $buildType.Trim().ToLowerInvariant()
+          if "${{ secrets.SCOUT_JFROG_URL }}"=="" (
+            echo ERROR: SCOUT_JFROG_URL is missing or empty.
+            exit /b 1
+          )
 
-          $calendarWeek = $calendarWeek.Trim().ToUpperInvariant()
-          $calendarWeek = $calendarWeek -replace '\s', ''
+          if "${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}"=="" (
+            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN is missing or empty.
+            exit /b 1
+          )
 
-          if ([string]::IsNullOrWhiteSpace($sourcePath)) {
-              throw "source_path cannot be empty."
-          }
-
-          if ($sourcePath.Contains('..')) {
-              throw "source_path cannot contain '..'."
-          }
-
-          if ($buildType -notin @('nightly', 'official')) {
-              throw "build_type must be either nightly or official."
-          }
-
-          if ($calendarWeek -notmatch '^CW(0?[1-9]|[1-4][0-9]|5[0-3])$') {
-              throw "calendar_week must be between CW1 and CW53."
-          }
-
-          $weekNumber = $calendarWeek.Substring(2).TrimStart('0')
-
-          if ([string]::IsNullOrWhiteSpace($weekNumber)) {
-              throw "Unable to determine the calendar week number."
-          }
-
-          $calendarWeek = "CW$weekNumber"
-
-          if ([string]::IsNullOrWhiteSpace($requestedBy)) {
-              $requestedBy = "Power Automate"
-          }
-
-          $destinationPath = "$buildType/$calendarWeek/$sourcePath"
-
-          "source_path=$sourcePath" >> $env:GITHUB_OUTPUT
-          "build_type=$buildType" >> $env:GITHUB_OUTPUT
-          "calendar_week=$calendarWeek" >> $env:GITHUB_OUTPUT
-          "destination_path=$destinationPath" >> $env:GITHUB_OUTPUT
-          "requested_by=$requestedBy" >> $env:GITHUB_OUTPUT
-
-          Write-Host "Validated input values"
-          Write-Host "Source repository : $env:SOURCE_REPO"
-          Write-Host "Source path       : $sourcePath"
-          Write-Host "Build type        : $buildType"
-          Write-Host "Calendar week     : $calendarWeek"
-          Write-Host "Destination repo  : $env:CLONE_REPO"
-          Write-Host "Destination path  : $destinationPath"
-          Write-Host "Requested by      : $requestedBy"
-
-      - name: Verify required configuration
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace($env:SOURCE_REPO)) {
-              throw "POC_SOURCE_REPO is missing or empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:CLONE_REPO)) {
-              throw "SCOUT_CLONE_REPO is missing or empty."
-          }
+          echo Required repository and JFrog secrets are configured.
 
       - name: Verify JFrog connection
-        shell: powershell
+        shell: cmd
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
           jf rt ping
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "Unable to connect to Scout JFrog."
-          }
+          if errorlevel 1 (
+            echo ERROR: Unable to connect to Scout JFrog.
+            exit /b 1
+          )
 
-      - name: Verify source artifact exists
-        shell: powershell
+          echo JFrog connection successful.
+
+      # =========================================================
+      # REPOSITORY DISPATCH: NIGHTLY
+      # =========================================================
+
+      - name: Validate dispatched Nightly request
+        if: >-
+          github.event_name == 'repository_dispatch' &&
+          github.event.client_payload.build_type == 'nightly'
+        shell: cmd
         env:
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          SOURCE_PATH: ${{ github.event.client_payload.source_path }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
-          $source = "$env:SOURCE_REPO/$env:SOURCE_PATH"
+          if "%SOURCE_PATH%"=="" (
+            echo ERROR: source_path is required for Nightly.
+            exit /b 1
+          )
 
-          Write-Host "Checking source artifact:"
-          Write-Host $source
+          echo %SOURCE_PATH% | findstr /C:".." >nul
+          if not errorlevel 1 (
+            echo ERROR: source_path cannot contain two consecutive dots.
+            exit /b 1
+          )
 
-          jf rt s "$source" --count=1 --fail-no-op=true
+          echo Nightly request validated.
+          echo Source path: %SOURCE_PATH%
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "Source artifact was not found: $source"
-          }
-
-      - name: Copy artifact to classified Scout Clone path
-        shell: powershell
+      - name: Copy dispatched Nightly artifact
+        if: >-
+          github.event_name == 'repository_dispatch' &&
+          github.event.client_payload.build_type == 'nightly'
+        shell: cmd
         env:
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
-          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+          SOURCE_PATH: ${{ github.event.client_payload.source_path }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
-          $source = "$env:SOURCE_REPO/$env:SOURCE_PATH"
-          $destination = "$env:CLONE_REPO/$env:DESTINATION_PATH"
+          echo ========================================
+          echo POC NIGHTLY BUILD
+          echo ========================================
+          echo Source:
+          echo %SOURCE_REPO%/%SOURCE_PATH%
+          echo.
+          echo Destination:
+          echo %CLONE_REPO%/nightly/%SOURCE_PATH%
+          echo.
 
-          Write-Host "Copying artifact"
-          Write-Host "From: $source"
-          Write-Host "To:   $destination"
-
-          jf rt cp "$source" "$destination" `
-            --flat=true `
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
             --fail-no-op=true
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "JFrog copy failed."
-          }
+          if errorlevel 1 (
+            echo ERROR: Nightly source artifact was not found.
+            exit /b 1
+          )
 
-          Write-Host "Artifact copy completed successfully."
+          jf rt cp ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            --flat=true ^
+            --fail-no-op=true
 
-      - name: Verify destination artifact
-        shell: powershell
+          if errorlevel 1 (
+            echo ERROR: Nightly artifact copy failed.
+            exit /b 1
+          )
+
+          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Nightly destination verification failed.
+            exit /b 1
+          )
+
+          echo.
+          echo NIGHTLY COPY SUCCESSFUL
+          echo No Calendar Week required.
+          echo No approval required.
+          echo No FVP promotion required.
+
+      # =========================================================
+      # REPOSITORY DISPATCH: OFFICIAL
+      # =========================================================
+
+      - name: Validate dispatched Official request
+        if: >-
+          github.event_name == 'repository_dispatch' &&
+          github.event.client_payload.build_type == 'official'
+        shell: cmd
         env:
-          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+          SOURCE_PATH: ${{ github.event.client_payload.source_path }}
+          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
-          $destination = "$env:CLONE_REPO/$env:DESTINATION_PATH"
+          if "%SOURCE_PATH%"=="" (
+            echo ERROR: source_path is required for Official.
+            exit /b 1
+          )
 
-          Write-Host "Verifying destination:"
-          Write-Host $destination
+          if "%CALENDAR_WEEK%"=="" (
+            echo ERROR: calendar_week is required for Official.
+            exit /b 1
+          )
 
-          jf rt s "$destination" --count=1 --fail-no-op=true
+          echo %SOURCE_PATH% | findstr /C:".." >nul
+          if not errorlevel 1 (
+            echo ERROR: source_path cannot contain two consecutive dots.
+            exit /b 1
+          )
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "Destination verification failed: $destination"
-          }
+          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
+          if errorlevel 1 (
+            echo ERROR: Calendar Week must be CW1 through CW53.
+            echo Received: %CALENDAR_WEEK%
+            exit /b 1
+          )
 
-      - name: Nightly completion
-        if: ${{ steps.resolve.outputs.build_type == 'nightly' }}
-        shell: powershell
+          echo Official request validated.
+          echo Source path: %SOURCE_PATH%
+          echo Calendar Week: %CALENDAR_WEEK%
+
+      - name: Copy dispatched Official artifact
+        if: >-
+          github.event_name == 'repository_dispatch' &&
+          github.event.client_payload.build_type == 'official'
+        shell: cmd
         env:
-          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
-          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+          SOURCE_PATH: ${{ github.event.client_payload.source_path }}
+          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
         run: |
-          Write-Host "Nightly build completed."
-          Write-Host "Calendar week: $env:CALENDAR_WEEK"
-          Write-Host "Clone path: $env:CLONE_REPO/$env:DESTINATION_PATH"
-          Write-Host "No approval or FVP promotion is required."
+          @echo off
 
-      - name: Send Official approval request
-        if: ${{ steps.resolve.outputs.build_type == 'official' }}
-        shell: powershell
+          echo ========================================
+          echo POC OFFICIAL BUILD
+          echo ========================================
+          echo Source:
+          echo %SOURCE_REPO%/%SOURCE_PATH%
+          echo.
+          echo Destination:
+          echo %CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%
+          echo.
+
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Official source artifact was not found.
+            exit /b 1
+          )
+
+          jf rt cp ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            --flat=true ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Official artifact copy failed.
+            exit /b 1
+          )
+
+          jf rt s "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Official destination verification failed.
+            exit /b 1
+          )
+
+          echo.
+          echo OFFICIAL COPY SUCCESSFUL
+
+      - name: Send dispatched Official approval request
+        if: >-
+          success() &&
+          github.event_name == 'repository_dispatch' &&
+          github.event.client_payload.build_type == 'official'
+        shell: cmd
         env:
-          APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
-          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
-          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
-          REQUESTED_BY: ${{ steps.resolve.outputs.requested_by }}
+          APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
+          SOURCE_PATH: ${{ github.event.client_payload.source_path }}
+          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          REQUESTED_BY: ${{ github.event.client_payload.requested_by }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
-          if ([string]::IsNullOrWhiteSpace($env:APPROVAL_WEBHOOK_URL)) {
-              throw "FVP_APPROVAL_WEBHOOK_URL is missing or empty."
-          }
+          if "%APPROVAL_URL%"=="" (
+            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing or empty.
+            exit /b 1
+          )
 
-          $payload = @{
-              request_type = "poc_official_fvp_approval"
-              source_repo = $env:SOURCE_REPO
-              source_path = $env:SOURCE_PATH
-              clone_repo = $env:CLONE_REPO
-              promotion_path = $env:DESTINATION_PATH
-              calendar_week = $env:CALENDAR_WEEK
-              build_type = "official"
-              requested_by = $env:REQUESTED_BY
-              github_repository = "${{ github.repository }}"
-              github_run_id = "${{ github.run_id }}"
-              github_run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } | ConvertTo-Json -Depth 10
+          curl.exe ^
+            --fail-with-body ^
+            --silent ^
+            --show-error ^
+            --request POST ^
+            --header "Content-Type: application/json" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"%REQUESTED_BY%\",\"github_repository\":\"${{ github.repository }}\",\"github_run_id\":\"${{ github.run_id }}\"}" ^
+            "%APPROVAL_URL%"
 
-          Invoke-RestMethod `
-            -Uri $env:APPROVAL_WEBHOOK_URL `
-            -Method Post `
-            -ContentType "application/json" `
-            -Body $payload
+          if errorlevel 1 (
+            echo ERROR: Official approval webhook request failed.
+            exit /b 1
+          )
 
-          Write-Host "Official approval request submitted successfully."
-          Write-Host "The workflow will not wait for the approval."
+          echo.
+          echo Official approval request submitted successfully.
+          echo This workflow does not wait for approval.
 
-      - name: Write job summary
-        if: ${{ always() }}
-        shell: powershell
+      # =========================================================
+      # MANUAL WORKFLOW DISPATCH: NIGHTLY
+      # =========================================================
+
+      - name: Validate manual Nightly request
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.build_type == 'nightly'
+        shell: cmd
         env:
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
-          BUILD_TYPE: ${{ steps.resolve.outputs.build_type }}
-          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
-          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+          SOURCE_PATH: ${{ inputs.source_path }}
         run: |
-          @"
-          # POC Temp to Scout Clone
+          @echo off
 
-          | Field | Value |
-          |---|---|
-          | Source repository | $env:SOURCE_REPO |
-          | Source path | $env:SOURCE_PATH |
-          | Build type | $env:BUILD_TYPE |
-          | Calendar week | $env:CALENDAR_WEEK |
-          | Clone repository | $env:CLONE_REPO |
-          | Clone path | $env:DESTINATION_PATH |
-          | Workflow result | ${{ job.status }} |
-          "@ >> $env:GITHUB_STEP_SUMMARY
+          if "%SOURCE_PATH%"=="" (
+            echo ERROR: source_path is required.
+            exit /b 1
+          )
+
+          echo %SOURCE_PATH% | findstr /C:".." >nul
+          if not errorlevel 1 (
+            echo ERROR: source_path cannot contain two consecutive dots.
+            exit /b 1
+          )
+
+          echo Manual Nightly request validated.
+
+      - name: Copy manual Nightly artifact
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.build_type == 'nightly'
+        shell: cmd
+        env:
+          SOURCE_PATH: ${{ inputs.source_path }}
+        run: |
+          @echo off
+
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Nightly source artifact was not found.
+            exit /b 1
+          )
+
+          jf rt cp ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            --flat=true ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Manual Nightly copy failed.
+            exit /b 1
+          )
+
+          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Nightly destination verification failed.
+            exit /b 1
+          )
+
+          echo NIGHTLY COPY SUCCESSFUL
+          echo No Calendar Week required.
+          echo No approval required.
+
+      # =========================================================
+      # MANUAL WORKFLOW DISPATCH: OFFICIAL
+      # =========================================================
+
+      - name: Validate manual Official request
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.build_type == 'official'
+        shell: cmd
+        env:
+          SOURCE_PATH: ${{ inputs.source_path }}
+          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+        run: |
+          @echo off
+
+          if "%SOURCE_PATH%"=="" (
+            echo ERROR: source_path is required.
+            exit /b 1
+          )
+
+          if "%CALENDAR_WEEK%"=="" (
+            echo ERROR: calendar_week is required for Official.
+            exit /b 1
+          )
+
+          echo %SOURCE_PATH% | findstr /C:".." >nul
+          if not errorlevel 1 (
+            echo ERROR: source_path cannot contain two consecutive dots.
+            exit /b 1
+          )
+
+          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
+          if errorlevel 1 (
+            echo ERROR: Calendar Week must be CW1 through CW53.
+            exit /b 1
+          )
+
+          echo Manual Official request validated.
+
+      - name: Copy manual Official artifact
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.build_type == 'official'
+        shell: cmd
+        env:
+          SOURCE_PATH: ${{ inputs.source_path }}
+          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+        run: |
+          @echo off
+
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Official source artifact was not found.
+            exit /b 1
+          )
+
+          jf rt cp ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            --flat=true ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Manual Official copy failed.
+            exit /b 1
+          )
+
+          jf rt s "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: Official destination verification failed.
+            exit /b 1
+          )
+
+          echo OFFICIAL COPY SUCCESSFUL
+
+      - name: Send manual Official approval request
+        if: >-
+          success() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.build_type == 'official'
+        shell: cmd
+        env:
+          APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
+          SOURCE_PATH: ${{ inputs.source_path }}
+          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+        run: |
+          @echo off
+
+          if "%APPROVAL_URL%"=="" (
+            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing or empty.
+            exit /b 1
+          )
+
+          curl.exe ^
+            --fail-with-body ^
+            --silent ^
+            --show-error ^
+            --request POST ^
+            --header "Content-Type: application/json" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"${{ github.actor }}\",\"github_repository\":\"${{ github.repository }}\",\"github_run_id\":\"${{ github.run_id }}\"}" ^
+            "%APPROVAL_URL%"
+
+          if errorlevel 1 (
+            echo ERROR: Official approval webhook request failed.
+            exit /b 1
+          )
+
+          echo Official approval request submitted successfully.
