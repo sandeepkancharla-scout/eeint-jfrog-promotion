@@ -22,7 +22,7 @@ on:
           - official
 
       calendar_week:
-        description: "Required only for Official builds, for example CW43"
+        description: "Required only for Official builds"
         required: false
         type: string
 
@@ -59,32 +59,22 @@ jobs:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
-      - name: Verify required secrets
+      - name: Verify required configuration
         shell: cmd
         run: |
           @echo off
 
           if "%SOURCE_REPO%"=="" (
-            echo ERROR: POC_SOURCE_REPO is missing or empty.
+            echo ERROR: POC_SOURCE_REPO is missing.
             exit /b 1
           )
 
           if "%CLONE_REPO%"=="" (
-            echo ERROR: SCOUT_CLONE_REPO is missing or empty.
+            echo ERROR: SCOUT_CLONE_REPO is missing.
             exit /b 1
           )
 
-          if "${{ secrets.SCOUT_JFROG_URL }}"=="" (
-            echo ERROR: SCOUT_JFROG_URL is missing or empty.
-            exit /b 1
-          )
-
-          if "${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}"=="" (
-            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN is missing or empty.
-            exit /b 1
-          )
-
-          echo Required repository and JFrog secrets are configured.
+          echo Repository configuration is available.
 
       - name: Verify JFrog connection
         shell: cmd
@@ -100,9 +90,9 @@ jobs:
 
           echo JFrog connection successful.
 
-      # =========================================================
-      # REPOSITORY DISPATCH: NIGHTLY
-      # =========================================================
+      # =====================================================
+      # NIGHTLY - REPOSITORY DISPATCH
+      # =====================================================
 
       - name: Validate dispatched Nightly request
         if: >-
@@ -115,18 +105,12 @@ jobs:
           @echo off
 
           if "%SOURCE_PATH%"=="" (
-            echo ERROR: source_path is required for Nightly.
-            exit /b 1
-          )
-
-          echo %SOURCE_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: source_path cannot contain two consecutive dots.
+            echo ERROR: source_path is required.
             exit /b 1
           )
 
           echo Nightly request validated.
-          echo Source path: %SOURCE_PATH%
+          echo Source Path: %SOURCE_PATH%
 
       - name: Copy dispatched Nightly artifact
         if: >-
@@ -139,7 +123,7 @@ jobs:
           @echo off
 
           echo ========================================
-          echo POC NIGHTLY BUILD
+          echo NIGHTLY BUILD
           echo ========================================
           echo Source:
           echo %SOURCE_REPO%/%SOURCE_PATH%
@@ -148,12 +132,10 @@ jobs:
           echo %CLONE_REPO%/nightly/%SOURCE_PATH%
           echo.
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly source artifact was not found.
+            echo ERROR: Source artifact not found.
             exit /b 1
           )
 
@@ -164,13 +146,11 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly artifact copy failed.
+            echo ERROR: Nightly copy failed.
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
             echo ERROR: Nightly destination verification failed.
@@ -183,9 +163,9 @@ jobs:
           echo No approval required.
           echo No FVP promotion required.
 
-      # =========================================================
-      # REPOSITORY DISPATCH: OFFICIAL
-      # =========================================================
+      # =====================================================
+      # OFFICIAL - REPOSITORY DISPATCH
+      # =====================================================
 
       - name: Validate dispatched Official request
         if: >-
@@ -199,31 +179,18 @@ jobs:
           @echo off
 
           if "%SOURCE_PATH%"=="" (
-            echo ERROR: source_path is required for Official.
+            echo ERROR: source_path is required.
             exit /b 1
           )
 
           if "%CALENDAR_WEEK%"=="" (
-            echo ERROR: calendar_week is required for Official.
-            exit /b 1
-          )
-
-          echo %SOURCE_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: source_path cannot contain two consecutive dots.
-            exit /b 1
-          )
-
-          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
-          if errorlevel 1 (
-            echo ERROR: Calendar Week must be CW1 through CW53.
-            echo Received: %CALENDAR_WEEK%
+            echo ERROR: calendar_week is required for Official builds.
             exit /b 1
           )
 
           echo Official request validated.
-          echo Source path: %SOURCE_PATH%
-          echo Calendar Week: %CALENDAR_WEEK%
+          echo Source Path: %SOURCE_PATH%
+          echo Calendar Week / Folder: %CALENDAR_WEEK%
 
       - name: Copy dispatched Official artifact
         if: >-
@@ -237,7 +204,7 @@ jobs:
           @echo off
 
           echo ========================================
-          echo POC OFFICIAL BUILD
+          echo OFFICIAL BUILD
           echo ========================================
           echo Source:
           echo %SOURCE_REPO%/%SOURCE_PATH%
@@ -246,12 +213,10 @@ jobs:
           echo %CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%
           echo.
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official source artifact was not found.
+            echo ERROR: Source artifact not found.
             exit /b 1
           )
 
@@ -262,11 +227,12 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official artifact copy failed.
+            echo ERROR: Official copy failed.
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+          jf rt s ^
+            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
@@ -293,9 +259,11 @@ jobs:
           @echo off
 
           if "%APPROVAL_URL%"=="" (
-            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing or empty.
+            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing.
             exit /b 1
           )
+
+          echo Sending Official approval request...
 
           curl.exe ^
             --fail-with-body ^
@@ -303,23 +271,22 @@ jobs:
             --show-error ^
             --request POST ^
             --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"%REQUESTED_BY%\",\"github_repository\":\"${{ github.repository }}\",\"github_run_id\":\"${{ github.run_id }}\"}" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"%REQUESTED_BY%\"}" ^
             "%APPROVAL_URL%"
 
           if errorlevel 1 (
-            echo ERROR: Official approval webhook request failed.
+            echo ERROR: Approval webhook request failed.
             exit /b 1
           )
 
           echo.
           echo Official approval request submitted successfully.
-          echo This workflow does not wait for approval.
 
-      # =========================================================
-      # MANUAL WORKFLOW DISPATCH: NIGHTLY
-      # =========================================================
+      # =====================================================
+      # MANUAL NIGHTLY TEST
+      # =====================================================
 
-      - name: Validate manual Nightly request
+      - name: Manual Nightly copy
         if: >-
           github.event_name == 'workflow_dispatch' &&
           inputs.build_type == 'nightly'
@@ -334,30 +301,10 @@ jobs:
             exit /b 1
           )
 
-          echo %SOURCE_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: source_path cannot contain two consecutive dots.
-            exit /b 1
-          )
-
-          echo Manual Nightly request validated.
-
-      - name: Copy manual Nightly artifact
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.build_type == 'nightly'
-        shell: cmd
-        env:
-          SOURCE_PATH: ${{ inputs.source_path }}
-        run: |
-          @echo off
-
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly source artifact was not found.
+            echo ERROR: Source artifact not found.
             exit /b 1
           )
 
@@ -368,28 +315,24 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Manual Nightly copy failed.
+            echo ERROR: Nightly copy failed.
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly destination verification failed.
+            echo ERROR: Destination verification failed.
             exit /b 1
           )
 
           echo NIGHTLY COPY SUCCESSFUL
-          echo No Calendar Week required.
-          echo No approval required.
 
-      # =========================================================
-      # MANUAL WORKFLOW DISPATCH: OFFICIAL
-      # =========================================================
+      # =====================================================
+      # MANUAL OFFICIAL TEST
+      # =====================================================
 
-      - name: Validate manual Official request
+      - name: Manual Official copy
         if: >-
           github.event_name == 'workflow_dispatch' &&
           inputs.build_type == 'official'
@@ -410,37 +353,10 @@ jobs:
             exit /b 1
           )
 
-          echo %SOURCE_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: source_path cannot contain two consecutive dots.
-            exit /b 1
-          )
-
-          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
-          if errorlevel 1 (
-            echo ERROR: Calendar Week must be CW1 through CW53.
-            exit /b 1
-          )
-
-          echo Manual Official request validated.
-
-      - name: Copy manual Official artifact
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.build_type == 'official'
-        shell: cmd
-        env:
-          SOURCE_PATH: ${{ inputs.source_path }}
-          CALENDAR_WEEK: ${{ inputs.calendar_week }}
-        run: |
-          @echo off
-
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
+          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official source artifact was not found.
+            echo ERROR: Source artifact not found.
             exit /b 1
           )
 
@@ -451,16 +367,17 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Manual Official copy failed.
+            echo ERROR: Official copy failed.
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+          jf rt s ^
+            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official destination verification failed.
+            echo ERROR: Destination verification failed.
             exit /b 1
           )
 
@@ -480,7 +397,7 @@ jobs:
           @echo off
 
           if "%APPROVAL_URL%"=="" (
-            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing or empty.
+            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing.
             exit /b 1
           )
 
@@ -490,11 +407,11 @@ jobs:
             --show-error ^
             --request POST ^
             --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"${{ github.actor }}\",\"github_repository\":\"${{ github.repository }}\",\"github_run_id\":\"${{ github.run_id }}\"}" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"${{ github.actor }}\"}" ^
             "%APPROVAL_URL%"
 
           if errorlevel 1 (
-            echo ERROR: Official approval webhook request failed.
+            echo ERROR: Approval webhook request failed.
             exit /b 1
           )
 
