@@ -14,7 +14,7 @@ on:
         type: string
 
       calendar_week:
-        description: "Calendar week, for example CW43"
+        description: "Calendar Week / Release folder"
         required: true
         type: string
 
@@ -63,37 +63,20 @@ jobs:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
-      - name: Verify required secrets
+      - name: Verify configuration
         shell: cmd
         run: |
           @echo off
 
           if "%CLONE_REPO%"=="" (
-            echo ERROR: SCOUT_CLONE_REPO is missing or empty.
+            echo ERROR: SCOUT_CLONE_REPO is missing.
             exit /b 1
           )
 
           if "%FVP_REPO%"=="" (
-            echo ERROR: SCOUT_FVP_REPO is missing or empty.
+            echo ERROR: SCOUT_FVP_REPO is missing.
             exit /b 1
           )
-
-          if "${{ secrets.SCOUT_JFROG_URL }}"=="" (
-            echo ERROR: SCOUT_JFROG_URL is missing or empty.
-            exit /b 1
-          )
-
-          if "${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}"=="" (
-            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN is missing or empty.
-            exit /b 1
-          )
-
-          echo Required secrets are configured.
-
-      - name: Verify JFrog connection
-        shell: cmd
-        run: |
-          @echo off
 
           jf rt ping
 
@@ -104,11 +87,11 @@ jobs:
 
           echo JFrog connection successful.
 
-      # =========================================================
-      # REPOSITORY DISPATCH PROMOTION
-      # =========================================================
+      # =====================================================
+      # APPROVED REPOSITORY DISPATCH
+      # =====================================================
 
-      - name: Validate dispatched promotion request
+      - name: Validate dispatched promotion
         if: github.event_name == 'repository_dispatch'
         shell: cmd
         env:
@@ -128,37 +111,34 @@ jobs:
           )
 
           echo %PROMOTION_PATH% | findstr /B /I /C:"official/%CALENDAR_WEEK%/" >nul
+
           if errorlevel 1 (
-            echo ERROR: promotion_path must start with official/%CALENDAR_WEEK%/
-            echo Received: %PROMOTION_PATH%
+            echo ERROR: promotion_path does not match the supplied Calendar Week.
+            echo Promotion Path: %PROMOTION_PATH%
+            echo Calendar Week: %CALENDAR_WEEK%
             exit /b 1
           )
 
-          echo %PROMOTION_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: promotion_path cannot contain two consecutive dots.
-            exit /b 1
-          )
-
-          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
-          if errorlevel 1 (
-            echo ERROR: Calendar Week must be CW1 through CW53.
-            exit /b 1
-          )
-
-          echo Dispatched promotion request validated.
+          echo Promotion request validated.
+          echo Calendar Week / Folder: %CALENDAR_WEEK%
+          echo Promotion path: %PROMOTION_PATH%
 
       - name: Promote dispatched Official artifact
         if: github.event_name == 'repository_dispatch'
         shell: cmd
         env:
           PROMOTION_PATH: ${{ github.event.client_payload.promotion_path }}
-          FVP_PATH: ${{ github.event.client_payload.fvp_path }}
+          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
         run: |
           @echo off
+          setlocal EnableDelayedExpansion
 
-          if "%FVP_PATH%"=="" (
-            echo ERROR: fvp_path is required in the approval dispatch payload.
+          set "PREFIX=official/%CALENDAR_WEEK%/"
+          set "RELATIVE_PATH=%PROMOTION_PATH:*official/%CALENDAR_WEEK%/=%"
+          set "FVP_PATH=%CALENDAR_WEEK%/!RELATIVE_PATH!"
+
+          if "!RELATIVE_PATH!"=="" (
+            echo ERROR: Could not determine relative artifact path.
             exit /b 1
           )
 
@@ -169,10 +149,11 @@ jobs:
           echo %CLONE_REPO%/%PROMOTION_PATH%
           echo.
           echo Destination:
-          echo %FVP_REPO%/%FVP_PATH%
+          echo %FVP_REPO%/!FVP_PATH!
           echo.
 
-          jf rt s "%CLONE_REPO%/%PROMOTION_PATH%" ^
+          jf rt s ^
+            "%CLONE_REPO%/%PROMOTION_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
@@ -183,32 +164,35 @@ jobs:
 
           jf rt cp ^
             "%CLONE_REPO%/%PROMOTION_PATH%" ^
-            "%FVP_REPO%/%FVP_PATH%" ^
+            "%FVP_REPO%/!FVP_PATH!" ^
             --flat=true ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP promotion copy failed.
+            echo ERROR: FVP promotion failed.
             exit /b 1
           )
 
-          jf rt s "%FVP_REPO%/%FVP_PATH%" ^
+          jf rt s ^
+            "%FVP_REPO%/!FVP_PATH!" ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP destination verification failed.
+            echo ERROR: FVP verification failed.
             exit /b 1
           )
 
           echo.
           echo FVP PROMOTION SUCCESSFUL
 
-      # =========================================================
-      # MANUAL PROMOTION
-      # =========================================================
+          endlocal
 
-      - name: Validate manual promotion request
+      # =====================================================
+      # MANUAL TEST
+      # =====================================================
+
+      - name: Validate manual promotion
         if: github.event_name == 'workflow_dispatch'
         shell: cmd
         env:
@@ -228,20 +212,9 @@ jobs:
           )
 
           echo %PROMOTION_PATH% | findstr /B /I /C:"official/%CALENDAR_WEEK%/" >nul
-          if errorlevel 1 (
-            echo ERROR: promotion_path must start with official/%CALENDAR_WEEK%/
-            exit /b 1
-          )
 
-          echo %PROMOTION_PATH% | findstr /C:".." >nul
-          if not errorlevel 1 (
-            echo ERROR: promotion_path cannot contain two consecutive dots.
-            exit /b 1
-          )
-
-          echo %CALENDAR_WEEK% | findstr /R /X /C:"CW[1-9]" /C:"CW[1-4][0-9]" /C:"CW5[0-3]" >nul
           if errorlevel 1 (
-            echo ERROR: Calendar Week must be CW1 through CW53.
+            echo ERROR: promotion_path does not match the supplied Calendar Week.
             exit /b 1
           )
 
@@ -257,12 +230,11 @@ jobs:
           @echo off
           setlocal EnableDelayedExpansion
 
-          set "PREFIX=official/%CALENDAR_WEEK%/"
           set "RELATIVE_PATH=%PROMOTION_PATH:*official/%CALENDAR_WEEK%/=%"
           set "FVP_PATH=%CALENDAR_WEEK%/!RELATIVE_PATH!"
 
           if "!RELATIVE_PATH!"=="" (
-            echo ERROR: Unable to determine the FVP relative path.
+            echo ERROR: Could not determine relative path.
             exit /b 1
           )
 
@@ -273,12 +245,13 @@ jobs:
           echo %FVP_REPO%/!FVP_PATH!
           echo.
 
-          jf rt s "%CLONE_REPO%/%PROMOTION_PATH%" ^
+          jf rt s ^
+            "%CLONE_REPO%/%PROMOTION_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Approved Official artifact was not found.
+            echo ERROR: Approved Official artifact not found.
             exit /b 1
           )
 
@@ -289,20 +262,21 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Manual FVP promotion failed.
+            echo ERROR: FVP promotion failed.
             exit /b 1
           )
 
-          jf rt s "%FVP_REPO%/!FVP_PATH!" ^
+          jf rt s ^
+            "%FVP_REPO%/!FVP_PATH!" ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP destination verification failed.
+            echo ERROR: FVP verification failed.
             exit /b 1
           )
 
           echo.
-          echo MANUAL FVP PROMOTION SUCCESSFUL
+          echo FVP PROMOTION SUCCESSFUL
 
           endlocal
