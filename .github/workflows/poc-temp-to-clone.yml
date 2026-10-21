@@ -1,0 +1,294 @@
+name: POC - Temp to Scout Clone
+
+run-name: >-
+  POC Temp to Clone |
+  ${{ github.event.client_payload.build_type || inputs.build_type }} |
+  ${{ github.event.client_payload.calendar_week || inputs.calendar_week }} |
+  ${{ github.event.client_payload.source_path || inputs.source_path }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_path:
+        description: "Path inside the TEMP source repository"
+        required: true
+        type: string
+
+      build_type:
+        description: "Destination build type"
+        required: true
+        type: choice
+        options:
+          - nightly
+          - official
+
+      calendar_week:
+        description: "Calendar week, for example CW43"
+        required: true
+        type: string
+
+  repository_dispatch:
+    types:
+      - poc-temp-to-clone
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    poc-temp-to-clone-${{
+      github.event.client_payload.source_path ||
+      inputs.source_path ||
+      github.run_id
+    }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-copy:
+    name: Validate inputs and copy to Scout Clone
+    runs-on: self-hosted
+
+    timeout-minutes: 30
+
+    env:
+      SOURCE_REPO: ${{ secrets.POC_SOURCE_REPO }}
+      CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+
+    steps:
+      - name: Set up JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+
+      - name: Resolve and validate inputs
+        id: resolve
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ("${{ github.event_name }}" -eq "repository_dispatch") {
+              $sourcePath = "${{ github.event.client_payload.source_path }}"
+              $buildType = "${{ github.event.client_payload.build_type }}"
+              $calendarWeek = "${{ github.event.client_payload.calendar_week }}"
+              $requestedBy = "${{ github.event.client_payload.requested_by }}"
+          }
+          else {
+              $sourcePath = "${{ inputs.source_path }}"
+              $buildType = "${{ inputs.build_type }}"
+              $calendarWeek = "${{ inputs.calendar_week }}"
+              $requestedBy = "${{ github.actor }}"
+          }
+
+          $sourcePath = $sourcePath.Trim()
+          $sourcePath = $sourcePath.TrimStart('/')
+          $sourcePath = $sourcePath -replace '\\', '/'
+
+          $buildType = $buildType.Trim().ToLowerInvariant()
+
+          $calendarWeek = $calendarWeek.Trim().ToUpperInvariant()
+          $calendarWeek = $calendarWeek -replace '\s', ''
+
+          if ([string]::IsNullOrWhiteSpace($sourcePath)) {
+              throw "source_path cannot be empty."
+          }
+
+          if ($sourcePath.Contains('..')) {
+              throw "source_path cannot contain '..'."
+          }
+
+          if ($buildType -notin @('nightly', 'official')) {
+              throw "build_type must be either nightly or official."
+          }
+
+          if ($calendarWeek -notmatch '^CW(0?[1-9]|[1-4][0-9]|5[0-3])$') {
+              throw "calendar_week must be between CW1 and CW53."
+          }
+
+          $weekNumber = $calendarWeek.Substring(2).TrimStart('0')
+
+          if ([string]::IsNullOrWhiteSpace($weekNumber)) {
+              throw "Unable to determine the calendar week number."
+          }
+
+          $calendarWeek = "CW$weekNumber"
+
+          if ([string]::IsNullOrWhiteSpace($requestedBy)) {
+              $requestedBy = "Power Automate"
+          }
+
+          $destinationPath = "$buildType/$calendarWeek/$sourcePath"
+
+          "source_path=$sourcePath" >> $env:GITHUB_OUTPUT
+          "build_type=$buildType" >> $env:GITHUB_OUTPUT
+          "calendar_week=$calendarWeek" >> $env:GITHUB_OUTPUT
+          "destination_path=$destinationPath" >> $env:GITHUB_OUTPUT
+          "requested_by=$requestedBy" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Validated input values"
+          Write-Host "Source repository : $env:SOURCE_REPO"
+          Write-Host "Source path       : $sourcePath"
+          Write-Host "Build type        : $buildType"
+          Write-Host "Calendar week     : $calendarWeek"
+          Write-Host "Destination repo  : $env:CLONE_REPO"
+          Write-Host "Destination path  : $destinationPath"
+          Write-Host "Requested by      : $requestedBy"
+
+      - name: Verify required configuration
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_REPO)) {
+              throw "POC_SOURCE_REPO is missing or empty."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:CLONE_REPO)) {
+              throw "SCOUT_CLONE_REPO is missing or empty."
+          }
+
+      - name: Verify JFrog connection
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          jf rt ping
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to connect to Scout JFrog."
+          }
+
+      - name: Verify source artifact exists
+        shell: powershell
+        env:
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = "$env:SOURCE_REPO/$env:SOURCE_PATH"
+
+          Write-Host "Checking source artifact:"
+          Write-Host $source
+
+          jf rt s "$source" --count=1 --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Source artifact was not found: $source"
+          }
+
+      - name: Copy artifact to classified Scout Clone path
+        shell: powershell
+        env:
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = "$env:SOURCE_REPO/$env:SOURCE_PATH"
+          $destination = "$env:CLONE_REPO/$env:DESTINATION_PATH"
+
+          Write-Host "Copying artifact"
+          Write-Host "From: $source"
+          Write-Host "To:   $destination"
+
+          jf rt cp "$source" "$destination" `
+            --flat=true `
+            --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "JFrog copy failed."
+          }
+
+          Write-Host "Artifact copy completed successfully."
+
+      - name: Verify destination artifact
+        shell: powershell
+        env:
+          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $destination = "$env:CLONE_REPO/$env:DESTINATION_PATH"
+
+          Write-Host "Verifying destination:"
+          Write-Host $destination
+
+          jf rt s "$destination" --count=1 --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Destination verification failed: $destination"
+          }
+
+      - name: Nightly completion
+        if: ${{ steps.resolve.outputs.build_type == 'nightly' }}
+        shell: powershell
+        env:
+          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
+          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+        run: |
+          Write-Host "Nightly build completed."
+          Write-Host "Calendar week: $env:CALENDAR_WEEK"
+          Write-Host "Clone path: $env:CLONE_REPO/$env:DESTINATION_PATH"
+          Write-Host "No approval or FVP promotion is required."
+
+      - name: Send Official approval request
+        if: ${{ steps.resolve.outputs.build_type == 'official' }}
+        shell: powershell
+        env:
+          APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
+          REQUESTED_BY: ${{ steps.resolve.outputs.requested_by }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:APPROVAL_WEBHOOK_URL)) {
+              throw "FVP_APPROVAL_WEBHOOK_URL is missing or empty."
+          }
+
+          $payload = @{
+              request_type = "poc_official_fvp_approval"
+              source_repo = $env:SOURCE_REPO
+              source_path = $env:SOURCE_PATH
+              clone_repo = $env:CLONE_REPO
+              promotion_path = $env:DESTINATION_PATH
+              calendar_week = $env:CALENDAR_WEEK
+              build_type = "official"
+              requested_by = $env:REQUESTED_BY
+              github_repository = "${{ github.repository }}"
+              github_run_id = "${{ github.run_id }}"
+              github_run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | ConvertTo-Json -Depth 10
+
+          Invoke-RestMethod `
+            -Uri $env:APPROVAL_WEBHOOK_URL `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $payload
+
+          Write-Host "Official approval request submitted successfully."
+          Write-Host "The workflow will not wait for the approval."
+
+      - name: Write job summary
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          BUILD_TYPE: ${{ steps.resolve.outputs.build_type }}
+          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
+          DESTINATION_PATH: ${{ steps.resolve.outputs.destination_path }}
+        run: |
+          @"
+          # POC Temp to Scout Clone
+
+          | Field | Value |
+          |---|---|
+          | Source repository | $env:SOURCE_REPO |
+          | Source path | $env:SOURCE_PATH |
+          | Build type | $env:BUILD_TYPE |
+          | Calendar week | $env:CALENDAR_WEEK |
+          | Clone repository | $env:CLONE_REPO |
+          | Clone path | $env:DESTINATION_PATH |
+          | Workflow result | ${{ job.status }} |
+          "@ >> $env:GITHUB_STEP_SUMMARY
