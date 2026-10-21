@@ -39,7 +39,6 @@ jobs:
 
 
     env:
-
       SOURCE_SERVER_ID: vwg-source
       SCOUT_SERVER_ID: scout-target
 
@@ -203,7 +202,7 @@ jobs:
 
 
       # ==========================================================
-      # 5. CLEAN OLD JFROG CONFIGURATIONS
+      # 5. CLEAN EXISTING JFROG CONFIGURATIONS
       # ==========================================================
 
       - name: Cleanup Existing JFrog Configurations
@@ -322,12 +321,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $sourceUri = [System.Uri]$env:SOURCE_URL_INPUT
-          $configuredUri = [System.Uri]$env:VWG_URL
+          try {
+              $sourceUri = [System.Uri]$env:SOURCE_URL_INPUT
+          }
+          catch {
+              throw 'Unable to parse VWG source URL.'
+          }
+
+          try {
+              $configuredUri = [System.Uri]$env:VWG_URL
+          }
+          catch {
+              throw 'VWG_JFROG_URL secret is not a valid URL.'
+          }
 
           if ($sourceUri.Host -ne $configuredUri.Host) {
 
-              Write-Host 'Input host:'
+              Write-Host 'Input VWG host:'
               Write-Host $sourceUri.Host
 
               Write-Host 'Configured VWG host:'
@@ -372,7 +382,7 @@ jobs:
           Write-Host 'Parsed VWG path:'
           Write-Host $artifactPath
 
-          Write-Host 'Folder URL:'
+          Write-Host 'URL ends with slash:'
           Write-Host $isFolderUrl
 
           "artifact_path=$artifactPath" |
@@ -390,6 +400,8 @@ jobs:
 
       # ==========================================================
       # 11. DETERMINE SOURCE PATTERN
+      #
+      # Corrected PowerShell block with balanced braces.
       # ==========================================================
 
       - name: Determine VWG Source Pattern
@@ -405,6 +417,10 @@ jobs:
 
           $artifactPath = $env:ARTIFACT_PATH
 
+          if (-not $artifactPath) {
+              throw 'VWG artifact path is empty.'
+          }
+
           if ($env:FOLDER_URL -eq 'true') {
 
               $sourceType = 'folder'
@@ -413,14 +429,18 @@ jobs:
           }
           else {
 
-              & jf rt search `
+              Write-Host 'Checking exact VWG artifact path:'
+              Write-Host $artifactPath
+
+              jf rt search `
                   "$artifactPath" `
                   --server-id="$env:SOURCE_SERVER_ID" `
                   --recursive=false `
-                  --include-dirs=false `
-                  --fail-no-op=true
+                  --include-dirs=false
 
-              if ($LASTEXITCODE -eq 0) {
+              $exactSearchExitCode = $LASTEXITCODE
+
+              if ($exactSearchExitCode -eq 0) {
 
                   $sourceType = 'file'
                   $sourcePattern = $artifactPath
@@ -433,6 +453,11 @@ jobs:
 
               }
           }
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SOURCE CONFIGURATION'
+          Write-Host '========================================'
 
           Write-Host 'Source type:'
           Write-Host $sourceType
@@ -587,4 +612,421 @@ jobs:
                   --recursive=true `
                   --flat=false `
                   --include-dirs=true `
-                  --fail-no-op=true
+                  --fail-no-op=true `
+                  --threads=1 `
+                  --split-count=0 `
+                  --retries=2 `
+                  --retry-wait-time=10s
+
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+              throw 'VWG artifact download failed.'
+          }
+
+          Write-Host 'VWG download completed.'
+
+
+      # ==========================================================
+      # 15. LOCATE DOWNLOADED CONTENT
+      # ==========================================================
+
+      - name: Locate Downloaded Content
+        id: local
+        shell: pwsh
+
+        env:
+          STAGING_PATH: ${{ steps.staging.outputs.staging_path }}
+          ARTIFACT_PATH: ${{ steps.source.outputs.artifact_path }}
+          SOURCE_TYPE: ${{ steps.pattern.outputs.source_type }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $localSource = $null
+
+          if ($env:SOURCE_TYPE -eq 'file') {
+
+              $files = @(
+                  Get-ChildItem `
+                      -LiteralPath $env:STAGING_PATH `
+                      -Recurse `
+                      -File
+              )
+
+              if ($files.Count -ne 1) {
+
+                  Write-Host 'Downloaded files:'
+
+                  foreach ($file in $files) {
+                      Write-Host $file.FullName
+                  }
+
+                  throw 'Expected exactly one downloaded VWG file.'
+              }
+
+              $localSource = $env:STAGING_PATH
+
+          }
+          else {
+
+              $windowsPath = $env:ARTIFACT_PATH.Replace('/', '\')
+
+              $candidateWithRepo = Join-Path `
+                  -Path $env:STAGING_PATH `
+                  -ChildPath $windowsPath
+
+              if (Test-Path -LiteralPath $candidateWithRepo) {
+
+                  $localSource = $candidateWithRepo
+
+              }
+              else {
+
+                  $parts = $env:ARTIFACT_PATH.Split(
+                      '/',
+                      [System.StringSplitOptions]::RemoveEmptyEntries
+                  )
+
+                  if ($parts.Count -gt 1) {
+
+                      $withoutRepo = (
+                          $parts[1..($parts.Count - 1)] -join '\'
+                      )
+
+                      $candidateWithoutRepo = Join-Path `
+                          -Path $env:STAGING_PATH `
+                          -ChildPath $withoutRepo
+
+                      if (Test-Path -LiteralPath $candidateWithoutRepo) {
+
+                          $localSource = $candidateWithoutRepo
+
+                      }
+                  }
+              }
+
+              if (-not $localSource) {
+
+                  Write-Host ''
+                  Write-Host 'Downloaded structure:'
+
+                  Get-ChildItem `
+                      -LiteralPath $env:STAGING_PATH `
+                      -Recurse |
+                      ForEach-Object {
+                          Write-Host $_.FullName
+                      }
+
+                  throw 'Unable to locate selected VWG folder locally.'
+              }
+          }
+
+          $files = @(
+              Get-ChildItem `
+                  -LiteralPath $localSource `
+                  -Recurse `
+                  -File
+          )
+
+          if ($files.Count -eq 0) {
+              throw 'Downloaded VWG content contains no files.'
+          }
+
+          Write-Host ''
+          Write-Host 'Local source root:'
+          Write-Host $localSource
+
+          Write-Host 'File count:'
+          Write-Host $files.Count
+
+          Write-Host ''
+          Write-Host 'Files that will be copied to Scout:'
+
+          foreach ($file in $files) {
+
+              $relative = $file.FullName.Substring(
+                  $localSource.Length
+              )
+
+              $relative = $relative.TrimStart('\')
+
+              Write-Host $relative
+          }
+
+          "local_source=$localSource" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "file_count=$($files.Count)" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+
+      # ==========================================================
+      # 16. BUILD SCOUT DESTINATION
+      # ==========================================================
+
+      - name: Build Scout Destination
+        id: target
+        shell: pwsh
+
+        env:
+          CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+          FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
+          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
+          $fvpRepo = $env:FVP_REPO.Trim().Trim('/')
+          $folderName = $env:FOLDER_NAME.Trim().Trim('/')
+
+          if (-not $cloneRepo) {
+              throw 'SCOUT_CLONE_REPO is empty.'
+          }
+
+          if (-not $fvpRepo) {
+              throw 'SCOUT_FVP_REPO is empty.'
+          }
+
+          if (-not $folderName) {
+              throw 'Folder name is empty.'
+          }
+
+          $cloneTarget = "$cloneRepo/$folderName"
+          $fvpTarget = "$fvpRepo/$folderName"
+
+          Write-Host ''
+          Write-Host 'Scout Clone target:'
+          Write-Host $cloneTarget
+
+          Write-Host 'Configured future FVP target:'
+          Write-Host $fvpTarget
+
+          "clone_target=$cloneTarget" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "fvp_target=$fvpTarget" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+
+      # ==========================================================
+      # 17. PREVIEW SCOUT UPLOAD
+      # ==========================================================
+
+      - name: Preview Scout Clone Upload
+        shell: pwsh
+
+        env:
+          LOCAL_SOURCE: ${{ steps.local.outputs.local_source }}
+          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SCOUT UPLOAD DRY RUN'
+          Write-Host '========================================'
+
+          Write-Host 'FROM:'
+          Write-Host $env:LOCAL_SOURCE
+
+          Write-Host 'TO:'
+          Write-Host "$env:CLONE_TARGET/"
+
+          Push-Location $env:LOCAL_SOURCE
+
+          try {
+
+              jf rt upload `
+                  './*' `
+                  "$env:CLONE_TARGET/" `
+                  --server-id="$env:SCOUT_SERVER_ID" `
+                  --recursive=true `
+                  --flat=false `
+                  --dry-run
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Scout upload dry run failed.'
+              }
+
+          }
+          finally {
+
+              Pop-Location
+          }
+
+
+      # ==========================================================
+      # 18. UPLOAD TO SCOUT CLONE
+      # ==========================================================
+
+      - name: Upload to Scout Clone
+        shell: pwsh
+
+        env:
+          LOCAL_SOURCE: ${{ steps.local.outputs.local_source }}
+          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'UPLOADING TO SCOUT CLONE'
+          Write-Host '========================================'
+
+          Write-Host 'FROM:'
+          Write-Host $env:LOCAL_SOURCE
+
+          Write-Host 'TO:'
+          Write-Host "$env:CLONE_TARGET/"
+
+          Push-Location $env:LOCAL_SOURCE
+
+          try {
+
+              jf rt upload `
+                  './*' `
+                  "$env:CLONE_TARGET/" `
+                  --server-id="$env:SCOUT_SERVER_ID" `
+                  --recursive=true `
+                  --flat=false `
+                  --fail-no-op=true `
+                  --threads=4 `
+                  --retries=3 `
+                  --retry-wait-time=5s
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Scout clone upload failed.'
+              }
+
+          }
+          finally {
+
+              Pop-Location
+          }
+
+          Write-Host 'Scout clone upload completed.'
+
+
+      # ==========================================================
+      # 19. VERIFY SCOUT CLONE
+      # ==========================================================
+
+      - name: Verify Scout Clone
+        shell: pwsh
+
+        env:
+          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $targetPattern = "$env:CLONE_TARGET/*"
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFYING SCOUT CLONE'
+          Write-Host '========================================'
+
+          Write-Host 'Target pattern:'
+          Write-Host $targetPattern
+
+          jf rt search `
+              "$targetPattern" `
+              --server-id="$env:SCOUT_SERVER_ID" `
+              --recursive=true `
+              --include-dirs=false `
+              --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Scout clone verification failed.'
+          }
+
+          Write-Host 'Scout clone verified.'
+
+
+      # ==========================================================
+      # 20. SUMMARY
+      # ==========================================================
+
+      - name: Migration Summary
+        if: success()
+        shell: pwsh
+
+        env:
+          SOURCE_URL: ${{ steps.inputs.outputs.source_url }}
+          FOLDER_NAME: ${{ steps.inputs.outputs.folder_name }}
+          CLONE_TARGET: ${{ steps.target.outputs.clone_target }}
+          FVP_TARGET: ${{ steps.target.outputs.fvp_target }}
+          FILE_COUNT: ${{ steps.local.outputs.file_count }}
+
+        run: |
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VWG -> SCOUT CLONE SUCCESSFUL'
+          Write-Host '========================================'
+
+          Write-Host 'VWG source:'
+          Write-Host $env:SOURCE_URL
+
+          Write-Host 'Folder name:'
+          Write-Host $env:FOLDER_NAME
+
+          Write-Host 'Scout Clone:'
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host 'Files transferred:'
+          Write-Host $env:FILE_COUNT
+
+          Write-Host ''
+          Write-Host 'Configured future FVP location:'
+          Write-Host $env:FVP_TARGET
+
+          Write-Host ''
+          Write-Host 'Migration status:'
+          Write-Host 'SUCCESS'
+
+
+      # ==========================================================
+      # 21. CLEANUP
+      # ==========================================================
+
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        continue-on-error: true
+
+        env:
+          STAGING_PATH: ${{ steps.staging.outputs.staging_path }}
+
+        run: |
+          if (
+              $env:STAGING_PATH -and
+              (Test-Path -LiteralPath $env:STAGING_PATH)
+          ) {
+
+              Remove-Item `
+                  -LiteralPath $env:STAGING_PATH `
+                  -Recurse `
+                  -Force
+          }
+
+          jf c rm "$env:SOURCE_SERVER_ID" --quiet
+          jf c rm "$env:SCOUT_SERVER_ID" --quiet
+
+          Write-Host 'Temporary migration data cleaned.'
