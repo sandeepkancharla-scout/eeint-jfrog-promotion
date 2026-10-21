@@ -1,0 +1,259 @@
+name: POC - Approved Official to FVP
+
+run-name: >-
+  POC Clone to FVP |
+  ${{ github.event.client_payload.calendar_week || inputs.calendar_week }} |
+  ${{ github.event.client_payload.promotion_path || inputs.promotion_path }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_path:
+        description: "Official artifact path inside Scout Clone"
+        required: true
+        type: string
+
+      calendar_week:
+        description: "Calendar week, for example CW43"
+        required: true
+        type: string
+
+      requested_by:
+        description: "Person who requested or approved the promotion"
+        required: false
+        default: "Manual GitHub run"
+        type: string
+
+  repository_dispatch:
+    types:
+      - poc-fvp-promotion-approved
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    poc-clone-to-fvp-${{
+      github.event.client_payload.promotion_path ||
+      inputs.promotion_path ||
+      github.run_id
+    }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Copy approved Official artifact to FVP
+    runs-on: self-hosted
+
+    timeout-minutes: 30
+
+    env:
+      CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+      FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
+
+    steps:
+      - name: Set up JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+
+      - name: Resolve and validate promotion inputs
+        id: resolve
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ("${{ github.event_name }}" -eq "repository_dispatch") {
+              $promotionPath = "${{ github.event.client_payload.promotion_path }}"
+              $calendarWeek = "${{ github.event.client_payload.calendar_week }}"
+              $requestedBy = "${{ github.event.client_payload.requested_by }}"
+              $approvedBy = "${{ github.event.client_payload.approved_by }}"
+          }
+          else {
+              $promotionPath = "${{ inputs.promotion_path }}"
+              $calendarWeek = "${{ inputs.calendar_week }}"
+              $requestedBy = "${{ inputs.requested_by }}"
+              $approvedBy = "${{ github.actor }}"
+          }
+
+          $promotionPath = $promotionPath.Trim()
+          $promotionPath = $promotionPath.TrimStart('/')
+          $promotionPath = $promotionPath -replace '\\', '/'
+
+          $calendarWeek = $calendarWeek.Trim().ToUpperInvariant()
+          $calendarWeek = $calendarWeek -replace '\s', ''
+
+          if ([string]::IsNullOrWhiteSpace($promotionPath)) {
+              throw "promotion_path cannot be empty."
+          }
+
+          if ($promotionPath.Contains('..')) {
+              throw "promotion_path cannot contain '..'."
+          }
+
+          if (-not $promotionPath.StartsWith('official/')) {
+              throw "Only paths below official/ can be promoted to FVP."
+          }
+
+          if ($calendarWeek -notmatch '^CW(0?[1-9]|[1-4][0-9]|5[0-3])$') {
+              throw "calendar_week must be between CW1 and CW53."
+          }
+
+          $weekNumber = $calendarWeek.Substring(2).TrimStart('0')
+
+          if ([string]::IsNullOrWhiteSpace($weekNumber)) {
+              throw "Unable to determine calendar week."
+          }
+
+          $calendarWeek = "CW$weekNumber"
+
+          $expectedPrefix = "official/$calendarWeek/"
+
+          if (-not $promotionPath.StartsWith(
+              $expectedPrefix,
+              [System.StringComparison]::OrdinalIgnoreCase
+          )) {
+              throw "promotion_path does not match calendar_week. Expected prefix: $expectedPrefix"
+          }
+
+          $relativePath = $promotionPath.Substring($expectedPrefix.Length)
+
+          if ([string]::IsNullOrWhiteSpace($relativePath)) {
+              throw "The Official promotion path does not contain an artifact path."
+          }
+
+          $fvpPath = "$calendarWeek/$relativePath"
+
+          if ([string]::IsNullOrWhiteSpace($requestedBy)) {
+              $requestedBy = "Power Automate"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($approvedBy)) {
+              $    }
+
+          "promotion_path=$promotionPath" >> $env:GITHUB_OUTPUT
+          "calendar_week=$calendarWeek" >> $env:GITHUB_OUTPUT
+          "relative_path=$relativePath" >> $env:GITHUB_OUTPUT
+          "fvp_path=$fvpPath" >> $env:GITHUB_OUTPUT
+          "requested_by=$requestedBy" >> $env:GITHUB_OUTPUT
+          "approved_by=$approvedBy" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Validated promotion"
+          Write-Host "Clone repository : $env:CLONE_REPO"
+          Write-Host "Promotion path   : $promotionPath"
+          Write-Host "Calendar week    : $calendarWeek"
+          Write-Host "FVP repository   : $env:FVP_REPO"
+          Write-Host "FVP path         : $fvpPath"
+          Write-Host "Requested by     : $requestedBy"
+          Write-Host "Approved by      : $approvedBy"
+
+      - name: Verify required configuration
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (:IsNullOrWhiteSpace($env:CLONE_REPO)) {
+              throw "SCOUT_CLONE_REPO is missing or empty."
+          }
+
+          if (:IsNullOrWhiteSpace($env:FVP_REPO)) {
+              throw "SCOUT_FVP_REPO is missing or empty."
+          }
+
+      - name: Verify JFrog connection
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          jf rt ping
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to connect to Scout JFrog."
+          }
+
+      - name: Verify approved Official artifact
+        shell: powershell
+        env:
+          PROMOTION_PATH: ${{ steps.resolve.outputs.promotion_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = "$env:CLONE_REPO/$env:PROMOTION_PATH"
+
+          Write-Host "Checking approved Official artifact:"
+          Write-Host $source
+
+          jf rt s "$source" --count=1 --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Approved Official artifact was not found: $source"
+          }
+
+      - name: Copy approved Official artifact to FVP
+        shell: powershell
+        env:
+          PROMOTION_PATH: ${{ steps.resolve.outputs.promotion_path }}
+          FVP_PATH: ${{ steps.resolve.outputs.fvp_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = "$env:CLONE_REPO/$env:PROMOTION_PATH"
+          $destination = "$env:FVP_REPO/$env:FVP_PATH"
+
+          Write-Host "Promoting approved artifact"
+          Write-Host "From: $source"
+          Write-Host "To:   $destination"
+
+          jf rt cp "$source" "$destination" `
+            --flat=true `
+            --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "FVP copy failed."
+          }
+
+          Write-Host "Approved artifact copied to FVP successfully."
+
+      - name: Verify FVP artifact
+        shell: powershell
+        env:
+          FVP_PATH: ${{ steps.resolve.outputs.fvp_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $destination = "$env:FVP_REPO/$env:FVP_PATH"
+
+          Write-Host "Verifying FVP artifact:"
+          Write-Host $destination
+
+          jf rt s "$destination" --count=1 --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "FVP verification failed: $destination"
+          }
+
+      - name: Write promotion summary
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          PROMOTION_PATH: ${{ steps.resolve.outputs.promotion_path }}
+          CALENDAR_WEEK: ${{ steps.resolve.outputs.calendar_week }}
+          FVP_PATH: ${{ steps.resolve.outputs.fvp_path }}
+          REQUESTED_BY: ${{ steps.resolve.outputs.requested_by }}
+          APPROVED_BY: ${{ steps.resolve.outputs.approved_by }}
+        run: |
+          @"
+          # POC Approved Official Promotion
+
+          | Field | Value |
+          |---|---|
+          | Clone repository | $env:CLONE_REPO |
+          | Clone path | $env:PROMOTION_PATH |
+          | Calendar week | $env:CALENDAR_WEEK |
+          | FVP repository | $env:FVP_REPO |
+          | FVP path | $env:FVP_PATH |
+          | Requested by | $env:REQUESTED_BY |
+          | Approved by | $env:APPROVED_BY |
+          | Workflow result | ${{ job.status }} |
+          "@ >> $env:GITHUB_STEP_SUMMARY
