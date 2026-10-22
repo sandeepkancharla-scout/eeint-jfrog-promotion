@@ -9,23 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       promotion_path:
-        description: "Official path inside Scout Clone"
+        description: "Official_Release path inside Scout Clone"
         required: true
         type: string
 
       calendar_week:
-        description: "Calendar Week / Release folder"
+        description: "Release folder"
         required: true
         type: string
 
       requested_by:
         description: "Original requester"
-        required: false
-        default: "Manual GitHub run"
-        type: string
-
-      approved_by:
-        description: "Approver"
         required: false
         default: "Manual GitHub run"
         type: string
@@ -85,18 +79,18 @@ jobs:
             exit /b 1
           )
 
-          echo JFrog connection successful.
+          echo Configuration validated successfully.
 
       # =====================================================
       # APPROVED REPOSITORY DISPATCH
       # =====================================================
 
-      - name: Validate dispatched promotion
+      - name: Validate approved promotion request
         if: github.event_name == 'repository_dispatch'
         shell: cmd
         env:
           PROMOTION_PATH: ${{ github.event.client_payload.promotion_path }}
-          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          RELEASE_FOLDER: ${{ github.event.client_payload.calendar_week }}
         run: |
           @echo off
 
@@ -105,45 +99,46 @@ jobs:
             exit /b 1
           )
 
-          if "%CALENDAR_WEEK%"=="" (
-            echo ERROR: calendar_week is required.
+          if "%RELEASE_FOLDER%"=="" (
+            echo ERROR: Release folder is required.
             exit /b 1
           )
 
-          echo %PROMOTION_PATH% | findstr /B /I /C:"official/%CALENDAR_WEEK%/" >nul
+          echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/%RELEASE_FOLDER%/" >nul
 
           if errorlevel 1 (
-            echo ERROR: promotion_path does not match the supplied Calendar Week.
-            echo Promotion Path: %PROMOTION_PATH%
-            echo Calendar Week: %CALENDAR_WEEK%
+            echo ERROR: promotion_path does not match the Official Release folder.
+            echo Expected prefix:
+            echo Official_Release/%RELEASE_FOLDER%/
+            echo Received:
+            echo %PROMOTION_PATH%
             exit /b 1
           )
 
           echo Promotion request validated.
-          echo Calendar Week / Folder: %CALENDAR_WEEK%
-          echo Promotion path: %PROMOTION_PATH%
+          echo Release Folder: %RELEASE_FOLDER%
+          echo Promotion Path: %PROMOTION_PATH%
 
-      - name: Promote dispatched Official artifact
+      - name: Promote approved Official artifact to FVP
         if: github.event_name == 'repository_dispatch'
         shell: cmd
         env:
           PROMOTION_PATH: ${{ github.event.client_payload.promotion_path }}
-          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          RELEASE_FOLDER: ${{ github.event.client_payload.calendar_week }}
         run: |
           @echo off
           setlocal EnableDelayedExpansion
 
-          set "PREFIX=official/%CALENDAR_WEEK%/"
-          set "RELATIVE_PATH=%PROMOTION_PATH:*official/%CALENDAR_WEEK%/=%"
-          set "FVP_PATH=%CALENDAR_WEEK%/!RELATIVE_PATH!"
+          set "RELATIVE_PATH=%PROMOTION_PATH:*Official_Release/%RELEASE_FOLDER%/=%"
+          set "FVP_PATH=%RELEASE_FOLDER%/!RELATIVE_PATH!"
 
           if "!RELATIVE_PATH!"=="" (
-            echo ERROR: Could not determine relative artifact path.
+            echo ERROR: Unable to calculate FVP relative path.
             exit /b 1
           )
 
           echo ========================================
-          echo APPROVED OFFICIAL PROMOTION
+          echo APPROVED FVP PROMOTION
           echo ========================================
           echo Source:
           echo %CLONE_REPO%/%PROMOTION_PATH%
@@ -158,7 +153,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Approved Official artifact was not found.
+            echo ERROR: Approved artifact does not exist in Scout Clone.
             exit /b 1
           )
 
@@ -179,12 +174,14 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP verification failed.
+            echo ERROR: FVP destination verification failed.
             exit /b 1
           )
 
           echo.
           echo FVP PROMOTION SUCCESSFUL
+          echo Destination:
+          echo %FVP_REPO%/!FVP_PATH!
 
           endlocal
 
@@ -197,7 +194,7 @@ jobs:
         shell: cmd
         env:
           PROMOTION_PATH: ${{ inputs.promotion_path }}
-          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+          RELEASE_FOLDER: ${{ inputs.calendar_week }}
         run: |
           @echo off
 
@@ -206,15 +203,15 @@ jobs:
             exit /b 1
           )
 
-          if "%CALENDAR_WEEK%"=="" (
-            echo ERROR: calendar_week is required.
+          if "%RELEASE_FOLDER%"=="" (
+            echo ERROR: Release folder is required.
             exit /b 1
           )
 
-          echo %PROMOTION_PATH% | findstr /B /I /C:"official/%CALENDAR_WEEK%/" >nul
+          echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/%RELEASE_FOLDER%/" >nul
 
           if errorlevel 1 (
-            echo ERROR: promotion_path does not match the supplied Calendar Week.
+            echo ERROR: promotion_path does not match Official_Release/%RELEASE_FOLDER%/
             exit /b 1
           )
 
@@ -225,16 +222,16 @@ jobs:
         shell: cmd
         env:
           PROMOTION_PATH: ${{ inputs.promotion_path }}
-          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+          RELEASE_FOLDER: ${{ inputs.calendar_week }}
         run: |
           @echo off
           setlocal EnableDelayedExpansion
 
-          set "RELATIVE_PATH=%PROMOTION_PATH:*official/%CALENDAR_WEEK%/=%"
-          set "FVP_PATH=%CALENDAR_WEEK%/!RELATIVE_PATH!"
+          set "RELATIVE_PATH=%PROMOTION_PATH:*Official_Release/%RELEASE_FOLDER%/=%"
+          set "FVP_PATH=%RELEASE_FOLDER%/!RELATIVE_PATH!"
 
           if "!RELATIVE_PATH!"=="" (
-            echo ERROR: Could not determine relative path.
+            echo ERROR: Unable to calculate FVP relative path.
             exit /b 1
           )
 
@@ -251,7 +248,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Approved Official artifact not found.
+            echo ERROR: Approved artifact does not exist.
             exit /b 1
           )
 
@@ -272,7 +269,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP verification failed.
+            echo ERROR: FVP destination verification failed.
             exit /b 1
           )
 
