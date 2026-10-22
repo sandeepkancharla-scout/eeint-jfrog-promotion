@@ -59,7 +59,7 @@ jobs:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
-      - name: Verify required configuration
+      - name: Verify configuration
         shell: cmd
         run: |
           @echo off
@@ -74,21 +74,14 @@ jobs:
             exit /b 1
           )
 
-          echo Repository configuration is available.
-
-      - name: Verify JFrog connection
-        shell: cmd
-        run: |
-          @echo off
-
           jf rt ping
 
           if errorlevel 1 (
-            echo ERROR: Unable to connect to Scout JFrog.
+            echo ERROR: Unable to connect to JFrog.
             exit /b 1
           )
 
-          echo JFrog connection successful.
+          echo Configuration validated successfully.
 
       # =====================================================
       # NIGHTLY - REPOSITORY DISPATCH
@@ -129,19 +122,22 @@ jobs:
           echo %SOURCE_REPO%/%SOURCE_PATH%
           echo.
           echo Destination:
-          echo %CLONE_REPO%/nightly/%SOURCE_PATH%
+          echo %CLONE_REPO%/Dail_Builds/%SOURCE_PATH%
           echo.
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Source artifact not found.
+            echo ERROR: Source artifact does not exist.
             exit /b 1
           )
 
           jf rt cp ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -150,7 +146,10 @@ jobs:
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
             echo ERROR: Nightly destination verification failed.
@@ -159,7 +158,8 @@ jobs:
 
           echo.
           echo NIGHTLY COPY SUCCESSFUL
-          echo No Calendar Week required.
+          echo Destination: Dail_Builds/%SOURCE_PATH%
+          echo No release folder required.
           echo No approval required.
           echo No FVP promotion required.
 
@@ -174,7 +174,7 @@ jobs:
         shell: cmd
         env:
           SOURCE_PATH: ${{ github.event.client_payload.source_path }}
-          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          RELEASE_FOLDER: ${{ github.event.client_payload.calendar_week }}
         run: |
           @echo off
 
@@ -183,14 +183,14 @@ jobs:
             exit /b 1
           )
 
-          if "%CALENDAR_WEEK%"=="" (
-            echo ERROR: calendar_week is required for Official builds.
+          if "%RELEASE_FOLDER%"=="" (
+            echo ERROR: Release folder is required for Official builds.
             exit /b 1
           )
 
           echo Official request validated.
           echo Source Path: %SOURCE_PATH%
-          echo Calendar Week / Folder: %CALENDAR_WEEK%
+          echo Release Folder: %RELEASE_FOLDER%
 
       - name: Copy dispatched Official artifact
         if: >-
@@ -199,7 +199,7 @@ jobs:
         shell: cmd
         env:
           SOURCE_PATH: ${{ github.event.client_payload.source_path }}
-          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          RELEASE_FOLDER: ${{ github.event.client_payload.calendar_week }}
         run: |
           @echo off
 
@@ -210,19 +210,22 @@ jobs:
           echo %SOURCE_REPO%/%SOURCE_PATH%
           echo.
           echo Destination:
-          echo %CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%
+          echo %CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%
           echo.
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Source artifact not found.
+            echo ERROR: Source artifact does not exist.
             exit /b 1
           )
 
           jf rt cp ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -232,7 +235,7 @@ jobs:
           )
 
           jf rt s ^
-            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
@@ -243,8 +246,10 @@ jobs:
 
           echo.
           echo OFFICIAL COPY SUCCESSFUL
+          echo Destination:
+          echo Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%
 
-      - name: Send dispatched Official approval request
+      - name: Send dispatched Official FVP approval request
         if: >-
           success() &&
           github.event_name == 'repository_dispatch' &&
@@ -253,7 +258,7 @@ jobs:
         env:
           APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
           SOURCE_PATH: ${{ github.event.client_payload.source_path }}
-          CALENDAR_WEEK: ${{ github.event.client_payload.calendar_week }}
+          RELEASE_FOLDER: ${{ github.event.client_payload.calendar_week }}
           REQUESTED_BY: ${{ github.event.client_payload.requested_by }}
         run: |
           @echo off
@@ -263,7 +268,7 @@ jobs:
             exit /b 1
           )
 
-          echo Sending Official approval request...
+          echo Sending Official FVP approval request...
 
           curl.exe ^
             --fail-with-body ^
@@ -271,16 +276,16 @@ jobs:
             --show-error ^
             --request POST ^
             --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"%REQUESTED_BY%\"}" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%RELEASE_FOLDER%\",\"promotion_path\":\"Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%\",\"requested_by\":\"%REQUESTED_BY%\"}" ^
             "%APPROVAL_URL%"
 
           if errorlevel 1 (
-            echo ERROR: Approval webhook request failed.
+            echo ERROR: FVP approval webhook request failed.
             exit /b 1
           )
 
           echo.
-          echo Official approval request submitted successfully.
+          echo FVP approval request submitted successfully.
 
       # =====================================================
       # MANUAL NIGHTLY TEST
@@ -301,16 +306,19 @@ jobs:
             exit /b 1
           )
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Source artifact not found.
+            echo ERROR: Source artifact does not exist.
             exit /b 1
           )
 
           jf rt cp ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            "%CLONE_REPO%/nightly/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -319,14 +327,18 @@ jobs:
             exit /b 1
           )
 
-          jf rt s "%CLONE_REPO%/nightly/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Destination verification failed.
+            echo ERROR: Nightly verification failed.
             exit /b 1
           )
 
           echo NIGHTLY COPY SUCCESSFUL
+          echo Destination: Dail_Builds/%SOURCE_PATH%
 
       # =====================================================
       # MANUAL OFFICIAL TEST
@@ -339,7 +351,7 @@ jobs:
         shell: cmd
         env:
           SOURCE_PATH: ${{ inputs.source_path }}
-          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+          RELEASE_FOLDER: ${{ inputs.calendar_week }}
         run: |
           @echo off
 
@@ -348,21 +360,24 @@ jobs:
             exit /b 1
           )
 
-          if "%CALENDAR_WEEK%"=="" (
-            echo ERROR: calendar_week is required for Official.
+          if "%RELEASE_FOLDER%"=="" (
+            echo ERROR: Release folder is required.
             exit /b 1
           )
 
-          jf rt s "%SOURCE_REPO%/%SOURCE_PATH%" --count=1 --fail-no-op=true
+          jf rt s ^
+            "%SOURCE_REPO%/%SOURCE_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Source artifact not found.
+            echo ERROR: Source artifact does not exist.
             exit /b 1
           )
 
           jf rt cp ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -372,18 +387,18 @@ jobs:
           )
 
           jf rt s ^
-            "%CLONE_REPO%/official/%CALENDAR_WEEK%/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Destination verification failed.
+            echo ERROR: Official verification failed.
             exit /b 1
           )
 
           echo OFFICIAL COPY SUCCESSFUL
 
-      - name: Send manual Official approval request
+      - name: Send manual Official FVP approval request
         if: >-
           success() &&
           github.event_name == 'workflow_dispatch' &&
@@ -392,7 +407,7 @@ jobs:
         env:
           APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
           SOURCE_PATH: ${{ inputs.source_path }}
-          CALENDAR_WEEK: ${{ inputs.calendar_week }}
+          RELEASE_FOLDER: ${{ inputs.calendar_week }}
         run: |
           @echo off
 
@@ -407,12 +422,12 @@ jobs:
             --show-error ^
             --request POST ^
             --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%CALENDAR_WEEK%\",\"promotion_path\":\"official/%CALENDAR_WEEK%/%SOURCE_PATH%\",\"requested_by\":\"${{ github.actor }}\"}" ^
+            --data "{\"request_type\":\"poc_official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%RELEASE_FOLDER%\",\"promotion_path\":\"Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%\",\"requested_by\":\"${{ github.actor }}\"}" ^
             "%APPROVAL_URL%"
 
           if errorlevel 1 (
-            echo ERROR: Approval webhook request failed.
+            echo ERROR: FVP approval webhook request failed.
             exit /b 1
           )
 
-          echo Official approval request submitted successfully.
+          echo FVP approval request submitted successfully.
