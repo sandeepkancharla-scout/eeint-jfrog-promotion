@@ -137,7 +137,7 @@ jobs:
 
           jf rt cp ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
-            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Daily_Builds/%SOURCE_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -147,7 +147,7 @@ jobs:
           )
 
           jf rt s ^
-            "%CLONE_REPO%/Dail_Builds/%SOURCE_PATH%" ^
+            "%CLONE_REPO%/Daily_Builds/%SOURCE_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
