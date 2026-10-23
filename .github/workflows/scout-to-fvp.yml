@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       promotion_path:
-        description: "Artifact path inside Scout Clone"
+        description: "Approved root folder path inside Scout Clone"
         required: true
         type: string
 
@@ -23,16 +23,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: scout-to-fvp-${{ github.event.client_payload.promotion_path || inputs.promotion_path || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   promote:
-    name: Promote Approved Artifact to FVP
+    name: Promote Approved Root Folder to FVP
 
     runs-on:
       - self-hosted
       - Windows
       - X64
 
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     env:
       CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
@@ -73,6 +77,11 @@ jobs:
             exit /b 1
           )
 
+          if "%BUILD_TYPE%"=="" (
+            echo ERROR: build_type is required.
+            exit /b 1
+          )
+
           if /I not "%BUILD_TYPE%"=="daily" (
             if /I not "%BUILD_TYPE%"=="official" (
               echo ERROR: build_type must be daily or official.
@@ -84,7 +93,9 @@ jobs:
             echo %PROMOTION_PATH% | findstr /B /I /C:"Daily_Builds/" >nul
 
             if errorlevel 1 (
-              echo ERROR: Daily promotion path must start with Daily_Builds/
+              echo ERROR: Daily promotion folder must start with:
+              echo Daily_Builds/
+              echo.
               echo Received:
               echo %PROMOTION_PATH%
               exit /b 1
@@ -95,112 +106,133 @@ jobs:
             echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/" >nul
 
             if errorlevel 1 (
-              echo ERROR: Official promotion path must start with Official_Release/
+              echo ERROR: Official promotion folder must start with:
+              echo Official_Release/
+              echo.
               echo Received:
               echo %PROMOTION_PATH%
               exit /b 1
             )
           )
 
+          echo ========================================
+          echo PROMOTION REQUEST
+          echo ========================================
+          echo Build Type:
+          echo %BUILD_TYPE%
+          echo.
+          echo Approved Root Folder:
+          echo %PROMOTION_PATH%
+          echo.
+
+      - name: Verify Scout JFrog connection
+        shell: cmd
+        run: |
+          @echo off
+
           jf rt ping
 
           if errorlevel 1 (
-            echo ERROR: Cannot connect to Scout JFrog.
+            echo ERROR: Unable to connect to Scout JFrog.
             exit /b 1
           )
 
-          echo Promotion request validated.
-          echo Build Type: %BUILD_TYPE%
-          echo Promotion Path: %PROMOTION_PATH%
+          echo Scout JFrog connection successful.
 
-      - name: Verify approved artifact exists in Scout Clone
-        shell: cmd
-        run: |
-          @echo off
-
-          echo Checking approved artifact:
-          echo %CLONE_REPO%/%PROMOTION_PATH%
-
-          jf rt search ^
-            "%CLONE_REPO%/%PROMOTION_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Approved artifact was not found in Scout Clone.
-            exit /b 1
-          )
-
-          echo Approved artifact found.
-
-      - name: Check whether destination already exists
-        shell: cmd
-        continue-on-error: true
-        run: |
-          @echo off
-
-          echo Checking existing FVP path:
-          echo %FVP_REPO%/%PROMOTION_PATH%
-
-          jf rt search ^
-            "%FVP_REPO%/%PROMOTION_PATH%" ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo Destination does not currently exist.
-            echo A new artifact will be created.
-            exit /b 0
-          )
-
-          echo Existing artifact found.
-          echo Existing artifact will be replaced at the same path.
-
-      - name: Promote approved artifact to FVP
+      - name: Verify approved root folder
         shell: cmd
         run: |
           @echo off
 
           echo ========================================
-          echo FVP PROMOTION
+          echo VERIFY APPROVED ROOT FOLDER
           echo ========================================
+          echo Searching:
+          echo %CLONE_REPO%/%PROMOTION_PATH%/*
+          echo.
 
+          jf rt search ^
+            "%CLONE_REPO%/%PROMOTION_PATH%/*" ^
+            --recursive=true ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: No artifacts were found under the approved root folder.
+            echo.
+            echo Folder:
+            echo %CLONE_REPO%/%PROMOTION_PATH%/
+            exit /b 1
+          )
+
+          echo Approved root folder contains artifacts.
+
+      - name: Promote approved root folder to FVP
+        shell: cmd
+        run: |
+          @echo off
+
+          echo ========================================
+          echo FVP ROOT FOLDER PROMOTION
+          echo ========================================
+          echo.
           echo Source:
-          echo %CLONE_REPO%/%PROMOTION_PATH%
-
+          echo %CLONE_REPO%/%PROMOTION_PATH%/
+          echo.
           echo Destination:
-          echo %FVP_REPO%/%PROMOTION_PATH%
+          echo %FVP_REPO%/%PROMOTION_PATH%/
+          echo.
+          echo All files under the approved root folder will be copied.
+          echo Existing files at matching paths will be replaced.
+          echo.
 
           jf rt copy ^
-            "%CLONE_REPO%/%PROMOTION_PATH%" ^
-            "%FVP_REPO%/%PROMOTION_PATH%" ^
+            "%CLONE_REPO%/%PROMOTION_PATH%/(*)" ^
+            "%FVP_REPO%/%PROMOTION_PATH%/{1}" ^
             --flat=true ^
+            --recursive=true ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP promotion failed.
+            echo ERROR: Root folder promotion to FVP failed.
             exit /b 1
           )
 
-          echo Artifact copied successfully.
+          echo Root folder copy completed.
 
-      - name: Verify FVP destination
+      - name: Verify FVP root folder
         shell: cmd
         run: |
           @echo off
 
+          echo ========================================
+          echo VERIFY FVP DESTINATION
+          echo ========================================
+
           jf rt search ^
-            "%FVP_REPO%/%PROMOTION_PATH%" ^
+            "%FVP_REPO%/%PROMOTION_PATH%/*" ^
+            --recursive=true ^
             --count=1 ^
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP destination verification failed.
+            echo ERROR: FVP root folder verification failed.
+            echo.
+            echo Destination:
+            echo %FVP_REPO%/%PROMOTION_PATH%/
             exit /b 1
           )
 
+          echo.
           echo ========================================
           echo FVP PROMOTION SUCCESSFUL
           echo ========================================
-          echo Final location:
-          echo %FVP_REPO%/%PROMOTION_PATH%
+          echo.
+          echo Build Type:
+          echo %BUILD_TYPE%
+          echo.
+          echo Approved Folder:
+          echo %PROMOTION_PATH%
+          echo.
+          echo Final FVP Location:
+          echo %FVP_REPO%/%PROMOTION_PATH%/
