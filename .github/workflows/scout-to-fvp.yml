@@ -1,10 +1,5 @@
 name: Scout Clone to FVP
 
-run-name: >-
-  Scout Clone to FVP |
-  ${{ github.event.client_payload.calendar_week || inputs.release_folder }} |
-  ${{ github.event.client_payload.promotion_path || inputs.promotion_path }}
-
 on:
   workflow_dispatch:
     inputs:
@@ -14,18 +9,9 @@ on:
         type: string
 
       release_folder:
-        description: "Release or Calendar Week folder"
+        description: "Release/CW number"
         required: true
         type: string
-
-      item_type:
-        description: "Select whether the source is an artifact or folder"
-        required: true
-        default: artifact
-        type: choice
-        options:
-          - artifact
-          - folder
 
   repository_dispatch:
     types:
@@ -34,19 +20,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    scout-to-fvp-${{
-      github.event.client_payload.promotion_path ||
-      inputs.promotion_path ||
-      github.run_id
-    }}
-  cancel-in-progress: false
-
 jobs:
-  promote-to-fvp:
-    name: Promote approved Official build to FVP
-    runs-on: self-hosted
+  promote:
+    name: Promote Approved Official Artifact to FVP
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+
     timeout-minutes: 30
 
     env:
@@ -61,16 +43,9 @@ jobs:
         ${{ github.event.client_payload.calendar_week ||
             inputs.release_folder }}
 
-      ITEM_TYPE: >-
-        ${{ github.event.client_payload.item_type ||
-            inputs.item_type ||
-            'artifact' }}
-
     steps:
       - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
-        with:
-          disable-job-summary: true
         env:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
@@ -96,14 +71,16 @@ jobs:
           )
 
           if "%RELEASE_FOLDER%"=="" (
-            echo ERROR: release_folder is required.
+            echo ERROR: Release/CW number is required.
             exit /b 1
           )
 
           echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/%RELEASE_FOLDER%/" >nul
 
           if errorlevel 1 (
-            echo ERROR: promotion_path must begin with:
+            echo ERROR: Invalid Official promotion path.
+            echo.
+            echo Expected prefix:
             echo Official_Release/%RELEASE_FOLDER%/
             echo.
             echo Received:
@@ -111,28 +88,27 @@ jobs:
             exit /b 1
           )
 
-          if /I not "%ITEM_TYPE%"=="artifact" (
-            if /I not "%ITEM_TYPE%"=="folder" (
-              echo ERROR: item_type must be artifact or folder.
-              exit /b 1
-            )
-          )
-
           jf rt ping
 
           if errorlevel 1 (
-            echo ERROR: Unable to connect to Scout JFrog.
+            echo ERROR: Cannot connect to Scout JFrog.
             exit /b 1
           )
 
           echo ========================================
           echo PROMOTION REQUEST VALIDATED
           echo ========================================
-          echo Clone repository: %CLONE_REPO%
-          echo FVP repository: %FVP_REPO%
-          echo Promotion path: %PROMOTION_PATH%
-          echo Release folder: %RELEASE_FOLDER%
-          echo Item type: %ITEM_TYPE%
+          echo Clone Repository:
+          echo %CLONE_REPO%
+          echo.
+          echo FVP Repository:
+          echo %FVP_REPO%
+          echo.
+          echo Promotion Path:
+          echo %PROMOTION_PATH%
+          echo.
+          echo Release/CW:
+          echo %RELEASE_FOLDER%
 
       - name: Calculate FVP destination
         id: destination
@@ -144,31 +120,32 @@ jobs:
           set "RELATIVE_PATH=%PROMOTION_PATH:*Official_Release/%RELEASE_FOLDER%/=%"
 
           if "!RELATIVE_PATH!"=="" (
-            echo ERROR: Unable to calculate the FVP relative path.
+            echo ERROR: Unable to calculate relative path.
             exit /b 1
           )
 
           if "!RELATIVE_PATH!"=="%PROMOTION_PATH%" (
-            echo ERROR: Official_Release prefix was not found.
+            echo ERROR: Official_Release path prefix not found.
             exit /b 1
           )
 
-          echo relative_path=!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
-          echo fvp_path=%RELEASE_FOLDER%/!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
+          set "FVP_PATH=%RELEASE_FOLDER%/!RELATIVE_PATH!"
 
-          echo Relative path:
-          echo !RELATIVE_PATH!
-          echo.
+          echo relative_path=!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
+          echo fvp_path=!FVP_PATH!>>"%GITHUB_OUTPUT%"
+
           echo FVP destination:
-          echo %FVP_REPO%/%RELEASE_FOLDER%/!RELATIVE_PATH!
+          echo %FVP_REPO%/!FVP_PATH!
 
           endlocal
 
-      - name: Verify approved artifact exists
-        if: env.ITEM_TYPE == 'artifact'
+      - name: Verify approved artifact exists in Scout Clone
         shell: cmd
         run: |
           @echo off
+
+          echo Checking:
+          echo %CLONE_REPO%/%PROMOTION_PATH%
 
           jf rt search ^
             "%CLONE_REPO%/%PROMOTION_PATH%" ^
@@ -180,28 +157,9 @@ jobs:
             exit /b 1
           )
 
-          echo Approved artifact exists.
-
-      - name: Verify approved folder exists
-        if: env.ITEM_TYPE == 'folder'
-        shell: cmd
-        run: |
-          @echo off
-
-          jf rt search ^
-            "%CLONE_REPO%/%PROMOTION_PATH%/*" ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Approved folder was not found in Scout Clone.
-            exit /b 1
-          )
-
-          echo Approved folder exists.
+          echo Approved artifact found.
 
       - name: Promote approved artifact to FVP
-        if: env.ITEM_TYPE == 'artifact'
         shell: cmd
         env:
           FVP_PATH: ${{ steps.destination.outputs.fvp_path }}
@@ -209,14 +167,13 @@ jobs:
           @echo off
 
           echo ========================================
-          echo PROMOTING APPROVED ARTIFACT TO FVP
+          echo FVP PROMOTION
           echo ========================================
           echo Source:
           echo %CLONE_REPO%/%PROMOTION_PATH%
           echo.
           echo Destination:
           echo %FVP_REPO%/%FVP_PATH%
-          echo.
 
           jf rt copy ^
             "%CLONE_REPO%/%PROMOTION_PATH%" ^
@@ -225,7 +182,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP artifact promotion failed.
+            echo ERROR: FVP promotion failed.
             exit /b 1
           )
 
@@ -235,56 +192,13 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: FVP artifact verification failed.
+            echo ERROR: FVP destination verification failed.
             exit /b 1
           )
 
           echo.
-          echo FVP ARTIFACT PROMOTION SUCCESSFUL
-          echo Destination:
+          echo ========================================
+          echo FVP PROMOTION SUCCESSFUL
+          echo ========================================
+          echo Final location:
           echo %FVP_REPO%/%FVP_PATH%
-
-      - name: Promote approved folder to FVP
-        if: env.ITEM_TYPE == 'folder'
-        shell: cmd
-        env:
-          RELATIVE_PATH: ${{ steps.destination.outputs.relative_path }}
-        run: |
-          @echo off
-
-          echo ========================================
-          echo PROMOTING APPROVED FOLDER TO FVP
-          echo ========================================
-          echo Source:
-          echo %CLONE_REPO%/%PROMOTION_PATH%/
-          echo.
-          echo Destination:
-          echo %FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/
-          echo.
-
-          jf rt copy ^
-            "%CLONE_REPO%/%PROMOTION_PATH%/(*)" ^
-            "%FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/{1}" ^
-            --flat=true ^
-            --recursive=true ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: FVP folder promotion failed.
-            exit /b 1
-          )
-
-          jf rt search ^
-            "%FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/*" ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: FVP folder verification failed.
-            exit /b 1
-          )
-
-          echo.
-          echo FVP FOLDER PROMOTION SUCCESSFUL
-          echo Destination:
-          echo %FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/
