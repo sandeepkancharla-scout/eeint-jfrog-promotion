@@ -4,14 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       promotion_path:
-        description: "Official_Release path inside Scout Clone"
+        description: "Artifact path inside Scout Clone"
         required: true
         type: string
 
-      release_folder:
-        description: "Release/CW number"
+      build_type:
+        description: "Build type"
         required: true
-        type: string
+        type: choice
+        options:
+          - daily
+          - official
 
   repository_dispatch:
     types:
@@ -22,7 +25,7 @@ permissions:
 
 jobs:
   promote:
-    name: Promote Approved Official Artifact to FVP
+    name: Promote Approved Artifact to FVP
 
     runs-on:
       - self-hosted
@@ -39,9 +42,9 @@ jobs:
         ${{ github.event.client_payload.promotion_path ||
             inputs.promotion_path }}
 
-      RELEASE_FOLDER: >-
-        ${{ github.event.client_payload.calendar_week ||
-            inputs.release_folder }}
+      BUILD_TYPE: >-
+        ${{ github.event.client_payload.build_type ||
+            inputs.build_type }}
 
     steps:
       - name: Set up JFrog CLI
@@ -70,22 +73,33 @@ jobs:
             exit /b 1
           )
 
-          if "%RELEASE_FOLDER%"=="" (
-            echo ERROR: Release/CW number is required.
-            exit /b 1
+          if /I not "%BUILD_TYPE%"=="daily" (
+            if /I not "%BUILD_TYPE%"=="official" (
+              echo ERROR: build_type must be daily or official.
+              exit /b 1
+            )
           )
 
-          echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/%RELEASE_FOLDER%/" >nul
+          if /I "%BUILD_TYPE%"=="daily" (
+            echo %PROMOTION_PATH% | findstr /B /I /C:"Daily_Builds/" >nul
 
-          if errorlevel 1 (
-            echo ERROR: Invalid Official promotion path.
-            echo.
-            echo Expected prefix:
-            echo Official_Release/%RELEASE_FOLDER%/
-            echo.
-            echo Received:
-            echo %PROMOTION_PATH%
-            exit /b 1
+            if errorlevel 1 (
+              echo ERROR: Daily promotion path must start with Daily_Builds/
+              echo Received:
+              echo %PROMOTION_PATH%
+              exit /b 1
+            )
+          )
+
+          if /I "%BUILD_TYPE%"=="official" (
+            echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/" >nul
+
+            if errorlevel 1 (
+              echo ERROR: Official promotion path must start with Official_Release/
+              echo Received:
+              echo %PROMOTION_PATH%
+              exit /b 1
+            )
           )
 
           jf rt ping
@@ -95,56 +109,16 @@ jobs:
             exit /b 1
           )
 
-          echo ========================================
-          echo PROMOTION REQUEST VALIDATED
-          echo ========================================
-          echo Clone Repository:
-          echo %CLONE_REPO%
-          echo.
-          echo FVP Repository:
-          echo %FVP_REPO%
-          echo.
-          echo Promotion Path:
-          echo %PROMOTION_PATH%
-          echo.
-          echo Release/CW:
-          echo %RELEASE_FOLDER%
-
-      - name: Calculate FVP destination
-        id: destination
-        shell: cmd
-        run: |
-          @echo off
-          setlocal EnableDelayedExpansion
-
-          set "RELATIVE_PATH=%PROMOTION_PATH:*Official_Release/%RELEASE_FOLDER%/=%"
-
-          if "!RELATIVE_PATH!"=="" (
-            echo ERROR: Unable to calculate relative path.
-            exit /b 1
-          )
-
-          if "!RELATIVE_PATH!"=="%PROMOTION_PATH%" (
-            echo ERROR: Official_Release path prefix not found.
-            exit /b 1
-          )
-
-          set "FVP_PATH=%RELEASE_FOLDER%/!RELATIVE_PATH!"
-
-          echo relative_path=!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
-          echo fvp_path=!FVP_PATH!>>"%GITHUB_OUTPUT%"
-
-          echo FVP destination:
-          echo %FVP_REPO%/!FVP_PATH!
-
-          endlocal
+          echo Promotion request validated.
+          echo Build Type: %BUILD_TYPE%
+          echo Promotion Path: %PROMOTION_PATH%
 
       - name: Verify approved artifact exists in Scout Clone
         shell: cmd
         run: |
           @echo off
 
-          echo Checking:
+          echo Checking approved artifact:
           echo %CLONE_REPO%/%PROMOTION_PATH%
 
           jf rt search ^
@@ -159,25 +133,47 @@ jobs:
 
           echo Approved artifact found.
 
+      - name: Check whether destination already exists
+        shell: cmd
+        continue-on-error: true
+        run: |
+          @echo off
+
+          echo Checking existing FVP path:
+          echo %FVP_REPO%/%PROMOTION_PATH%
+
+          jf rt search ^
+            "%FVP_REPO%/%PROMOTION_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo Destination does not currently exist.
+            echo A new artifact will be created.
+            exit /b 0
+          )
+
+          echo Existing artifact found.
+          echo Existing artifact will be replaced at the same path.
+
       - name: Promote approved artifact to FVP
         shell: cmd
-        env:
-          FVP_PATH: ${{ steps.destination.outputs.fvp_path }}
         run: |
           @echo off
 
           echo ========================================
           echo FVP PROMOTION
           echo ========================================
+
           echo Source:
           echo %CLONE_REPO%/%PROMOTION_PATH%
-          echo.
+
           echo Destination:
-          echo %FVP_REPO%/%FVP_PATH%
+          echo %FVP_REPO%/%PROMOTION_PATH%
 
           jf rt copy ^
             "%CLONE_REPO%/%PROMOTION_PATH%" ^
-            "%FVP_REPO%/%FVP_PATH%" ^
+            "%FVP_REPO%/%PROMOTION_PATH%" ^
             --flat=true ^
             --fail-no-op=true
 
@@ -186,8 +182,15 @@ jobs:
             exit /b 1
           )
 
+          echo Artifact copied successfully.
+
+      - name: Verify FVP destination
+        shell: cmd
+        run: |
+          @echo off
+
           jf rt search ^
-            "%FVP_REPO%/%FVP_PATH%" ^
+            "%FVP_REPO%/%PROMOTION_PATH%" ^
             --count=1 ^
             --fail-no-op=true
 
@@ -196,9 +199,8 @@ jobs:
             exit /b 1
           )
 
-          echo.
           echo ========================================
           echo FVP PROMOTION SUCCESSFUL
           echo ========================================
           echo Final location:
-          echo %FVP_REPO%/%FVP_PATH%
+          echo %FVP_REPO%/%PROMOTION_PATH%
