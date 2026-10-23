@@ -28,7 +28,12 @@ permissions:
 jobs:
   transfer:
     name: Transfer VWG Artifact to Scout Clone
-    runs-on: self-hosted
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+
     timeout-minutes: 60
 
     env:
@@ -44,11 +49,19 @@ jobs:
 
       CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
 
-      STAGING_DIR: ${{ runner.temp }}\vwg-scout-${{ github.run_id }}
-
     steps:
       - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
+
+      - name: Set temporary directory
+        shell: cmd
+        run: |
+          @echo off
+
+          echo STAGING_DIR=%RUNNER_TEMP%\vwg-scout-${{ github.run_id }}>>"%GITHUB_ENV%"
+
+          echo Temporary directory:
+          echo %RUNNER_TEMP%\vwg-scout-${{ github.run_id }}
 
       - name: Validate inputs
         shell: cmd
@@ -85,6 +98,13 @@ jobs:
             exit /b 1
           )
 
+          if /I not "%BUILD_TYPE%"=="nightly" (
+            if /I not "%BUILD_TYPE%"=="official" (
+              echo ERROR: Build type must be nightly or official.
+              exit /b 1
+            )
+          )
+
           if /I "%BUILD_TYPE%"=="official" (
             if "%RELEASE_FOLDER%"=="" (
               echo ERROR: Release/CW number is required for Official.
@@ -92,7 +112,16 @@ jobs:
             )
           )
 
-          echo Validation successful.
+          echo ========================================
+          echo INPUT VALIDATION SUCCESSFUL
+          echo ========================================
+          echo Build Type: %BUILD_TYPE%
+
+          if /I "%BUILD_TYPE%"=="official" (
+            echo Release/CW: %RELEASE_FOLDER%
+          ) else (
+            echo Release/CW: Not required
+          )
 
       - name: Parse VWG URL
         id: parse
@@ -102,12 +131,12 @@ jobs:
           setlocal EnableDelayedExpansion
 
           set "FULL_URL=%FILE_URL%"
-          set "PREFIX=%VWG_URL%/artifactory/"
           set "RELATIVE=!FULL_URL:%VWG_URL%/artifactory/=!"
 
           if "!RELATIVE!"=="!FULL_URL!" (
             echo ERROR: Invalid VWG JFrog URL.
-            echo Expected:
+            echo.
+            echo Expected format:
             echo %VWG_URL%/artifactory/REPOSITORY/PATH/FILE
             exit /b 1
           )
@@ -127,11 +156,11 @@ jobs:
             exit /b 1
           )
 
-          echo Source repository:
-          echo !SOURCE_REPO!
-
-          echo Source path:
-          echo !SOURCE_PATH!
+          echo ========================================
+          echo VWG SOURCE
+          echo ========================================
+          echo Repository: !SOURCE_REPO!
+          echo Path: !SOURCE_PATH!
 
           echo source_repo=!SOURCE_REPO!>>"%GITHUB_OUTPUT%"
           echo source_path=!SOURCE_PATH!>>"%GITHUB_OUTPUT%"
@@ -190,7 +219,7 @@ jobs:
 
           echo Scout JFrog connection successful.
 
-      - name: Prepare local temporary folder
+      - name: Prepare local temporary directory
         shell: cmd
         run: |
           @echo off
@@ -202,11 +231,11 @@ jobs:
           mkdir "%STAGING_DIR%"
 
           if errorlevel 1 (
-            echo ERROR: Could not create temporary folder.
+            echo ERROR: Could not create temporary directory.
             exit /b 1
           )
 
-          echo Temporary folder:
+          echo Temporary directory:
           echo %STAGING_DIR%
 
       - name: Verify VWG artifact
@@ -216,6 +245,9 @@ jobs:
           SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
         run: |
           @echo off
+
+          echo Checking VWG artifact:
+          echo %SOURCE_REPO%/%SOURCE_PATH%
 
           jf rt search ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
@@ -238,10 +270,13 @@ jobs:
         run: |
           @echo off
 
-          echo Downloading:
+          echo ========================================
+          echo DOWNLOAD FROM VWG
+          echo ========================================
+          echo Source:
           echo %SOURCE_REPO%/%SOURCE_PATH%
-
-          echo To:
+          echo.
+          echo Local temporary directory:
           echo %STAGING_DIR%
 
           jf rt download ^
@@ -258,7 +293,7 @@ jobs:
 
           echo Download successful.
 
-      - name: Calculate Scout destination
+      - name: Calculate Scout Clone destination
         id: destination
         shell: cmd
         env:
@@ -269,7 +304,9 @@ jobs:
           if /I "%BUILD_TYPE%"=="nightly" (
             echo destination_path=Daily_Builds/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo Nightly destination:
+            echo ========================================
+            echo NIGHTLY DESTINATION
+            echo ========================================
             echo %CLONE_REPO%/Daily_Builds/%SOURCE_PATH%
 
             exit /b 0
@@ -278,7 +315,9 @@ jobs:
           if /I "%BUILD_TYPE%"=="official" (
             echo destination_path=Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo Official destination:
+            echo ========================================
+            echo OFFICIAL DESTINATION
+            echo ========================================
             echo %CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%
 
             exit /b 0
@@ -295,7 +334,10 @@ jobs:
         run: |
           @echo off
 
-          echo Uploading Nightly build to:
+          echo ========================================
+          echo NIGHTLY BUILD
+          echo ========================================
+          echo Destination:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -317,11 +359,13 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly verification failed.
+            echo ERROR: Nightly destination verification failed.
             exit /b 1
           )
 
           echo Nightly transfer successful.
+          echo Final location:
+          echo %CLONE_REPO%/%DESTINATION_PATH%
           echo No FVP approval required.
 
       - name: Upload Official to Scout Clone
@@ -332,7 +376,10 @@ jobs:
         run: |
           @echo off
 
-          echo Uploading Official release to:
+          echo ========================================
+          echo OFFICIAL RELEASE
+          echo ========================================
+          echo Destination:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -354,11 +401,13 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official verification failed.
+            echo ERROR: Official destination verification failed.
             exit /b 1
           )
 
           echo Official transfer successful.
+          echo Final location:
+          echo %CLONE_REPO%/%DESTINATION_PATH%
 
       - name: Request FVP approval
         if: ${{ success() && inputs.build_type == 'official' }}
@@ -400,6 +449,10 @@ jobs:
         run: |
           @echo off
 
+          echo ========================================
+          echo CLEANUP
+          echo ========================================
+
           if exist "%STAGING_DIR%" (
             rmdir /S /Q "%STAGING_DIR%"
           )
@@ -407,4 +460,5 @@ jobs:
           jf c remove vwg-source --quiet >nul 2>&1
           jf c remove scout-target --quiet >nul 2>&1
 
-          echo Cleanup complete.
+          echo Local temporary files deleted.
+          echo Temporary JFrog configurations removed.
