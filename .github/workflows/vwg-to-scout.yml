@@ -112,9 +112,7 @@ jobs:
             )
           )
 
-          echo ========================================
-          echo INPUT VALIDATION SUCCESSFUL
-          echo ========================================
+          echo Input validation successful.
           echo Build Type: %BUILD_TYPE%
 
           if /I "%BUILD_TYPE%"=="official" (
@@ -135,7 +133,6 @@ jobs:
 
           if "!RELATIVE!"=="!FULL_URL!" (
             echo ERROR: Invalid VWG JFrog URL.
-            echo.
             echo Expected format:
             echo %VWG_URL%/artifactory/REPOSITORY/PATH/FILE
             exit /b 1
@@ -147,7 +144,7 @@ jobs:
           )
 
           if "!SOURCE_REPO!"=="" (
-            echo ERROR: Could not determine VWG repository.
+            echo ERROR: Could not determine VWG source repository.
             exit /b 1
           )
 
@@ -156,11 +153,11 @@ jobs:
             exit /b 1
           )
 
-          echo ========================================
-          echo VWG SOURCE
-          echo ========================================
-          echo Repository: !SOURCE_REPO!
-          echo Path: !SOURCE_PATH!
+          echo VWG Source Repository:
+          echo !SOURCE_REPO!
+
+          echo VWG Source Path:
+          echo !SOURCE_PATH!
 
           echo source_repo=!SOURCE_REPO!>>"%GITHUB_OUTPUT%"
           echo source_path=!SOURCE_PATH!>>"%GITHUB_OUTPUT%"
@@ -262,7 +259,7 @@ jobs:
 
           echo VWG artifact found.
 
-      - name: Download VWG artifact to local temp
+      - name: Download VWG artifact to local temporary directory
         shell: cmd
         env:
           SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
@@ -270,12 +267,9 @@ jobs:
         run: |
           @echo off
 
-          echo ========================================
-          echo DOWNLOAD FROM VWG
-          echo ========================================
-          echo Source:
+          echo Downloading:
           echo %SOURCE_REPO%/%SOURCE_PATH%
-          echo.
+
           echo Local temporary directory:
           echo %STAGING_DIR%
 
@@ -291,7 +285,7 @@ jobs:
             exit /b 1
           )
 
-          echo Download successful.
+          echo VWG download successful.
 
       - name: Calculate Scout Clone destination
         id: destination
@@ -304,9 +298,7 @@ jobs:
           if /I "%BUILD_TYPE%"=="nightly" (
             echo destination_path=Daily_Builds/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo ========================================
-            echo NIGHTLY DESTINATION
-            echo ========================================
+            echo Nightly destination:
             echo %CLONE_REPO%/Daily_Builds/%SOURCE_PATH%
 
             exit /b 0
@@ -315,9 +307,7 @@ jobs:
           if /I "%BUILD_TYPE%"=="official" (
             echo destination_path=Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo ========================================
-            echo OFFICIAL DESTINATION
-            echo ========================================
+            echo Official destination:
             echo %CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%
 
             exit /b 0
@@ -334,10 +324,7 @@ jobs:
         run: |
           @echo off
 
-          echo ========================================
-          echo NIGHTLY BUILD
-          echo ========================================
-          echo Destination:
+          echo Uploading Nightly artifact to:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -364,9 +351,6 @@ jobs:
           )
 
           echo Nightly transfer successful.
-          echo Final location:
-          echo %CLONE_REPO%/%DESTINATION_PATH%
-          echo No FVP approval required.
 
       - name: Upload Official to Scout Clone
         if: ${{ inputs.build_type == 'official' }}
@@ -376,10 +360,7 @@ jobs:
         run: |
           @echo off
 
-          echo ========================================
-          echo OFFICIAL RELEASE
-          echo ========================================
-          echo Destination:
+          echo Uploading Official artifact to:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -406,52 +387,12 @@ jobs:
           )
 
           echo Official transfer successful.
-          echo Final location:
-          echo %CLONE_REPO%/%DESTINATION_PATH%
-
-      - name: Request FVP approval
-        if: ${{ success() && inputs.build_type == 'official' }}
-        shell: cmd
-        env:
-          APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
-          SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
-          DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
-        run: |
-          @echo off
-
-          if "%APPROVAL_URL%"=="" (
-            echo ERROR: FVP_APPROVAL_WEBHOOK_URL is missing.
-            exit /b 1
-          )
-
-          echo Sending FVP approval request...
-
-          curl.exe ^
-            --fail-with-body ^
-            --silent ^
-            --show-error ^
-            --request POST ^
-            --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%RELEASE_FOLDER%\",\"promotion_path\":\"%DESTINATION_PATH%\",\"requested_by\":\"${{ github.actor }}\",\"item_type\":\"artifact\"}" ^
-            "%APPROVAL_URL%"
-
-          if errorlevel 1 (
-            echo ERROR: FVP approval request failed.
-            exit /b 1
-          )
-
-          echo FVP approval request submitted successfully.
 
       - name: Cleanup local temporary files
         if: ${{ always() }}
         shell: cmd
         run: |
           @echo off
-
-          echo ========================================
-          echo CLEANUP
-          echo ========================================
 
           if exist "%STAGING_DIR%" (
             rmdir /S /Q "%STAGING_DIR%"
