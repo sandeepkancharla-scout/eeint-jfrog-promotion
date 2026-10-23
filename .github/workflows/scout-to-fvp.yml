@@ -1,736 +1,290 @@
 name: Scout Clone to FVP
 
-run-name: "FVP Promotion | ${{ github.event.client_payload.folder_name || inputs.folder_name }}"
+run-name: >-
+  Scout Clone to FVP |
+  ${{ github.event.client_payload.calendar_week || inputs.release_folder }} |
+  ${{ github.event.client_payload.promotion_path || inputs.promotion_path }}
 
 on:
-
-  # Intentionally unfiltered for now.
-  # We already saw event-type filtering cause the dispatch
-  # not to start a workflow in the earlier POC.
-  repository_dispatch:
-
   workflow_dispatch:
     inputs:
-
-      folder_name:
-        description: "Scout folder to promote to FVP"
+      promotion_path:
+        description: "Official_Release path inside Scout Clone"
         required: true
         type: string
 
+      release_folder:
+        description: "Release or Calendar Week folder"
+        required: true
+        type: string
+
+      item_type:
+        description: "Select whether the source is an artifact or folder"
+        required: true
+        default: artifact
+        type: choice
+        options:
+          - artifact
+          - folder
+
+  repository_dispatch:
+    types:
+      - fvp-promotion-approved
 
 permissions:
   contents: read
 
-
 concurrency:
-
-  group: fvp-promotion-${{ github.event.client_payload.folder_name || inputs.folder_name }}
-
+  group: >-
+    scout-to-fvp-${{
+      github.event.client_payload.promotion_path ||
+      inputs.promotion_path ||
+      github.run_id
+    }}
   cancel-in-progress: false
 
-
 jobs:
-
-  promote:
-
-    name: Copy Approved Scout Folder to FVP
-
-    runs-on:
-      - self-hosted
-      - Windows
-
-    timeout-minutes: 60
-
+  promote-to-fvp:
+    name: Promote approved Official build to FVP
+    runs-on: self-hosted
+    timeout-minutes: 30
 
     env:
+      CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+      FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
 
-      SCOUT_SERVER_ID: scout-fvp-promotion
+      PROMOTION_PATH: >-
+        ${{ github.event.client_payload.promotion_path ||
+            inputs.promotion_path }}
 
-      JFROG_CLI_OFFER_CONFIG: "false"
+      RELEASE_FOLDER: >-
+        ${{ github.event.client_payload.calendar_week ||
+            inputs.release_folder }}
 
-      JFROG_CLI_LOG_LEVEL: INFO
-
+      ITEM_TYPE: >-
+        ${{ github.event.client_payload.item_type ||
+            inputs.item_type ||
+            'artifact' }}
 
     steps:
-
-
-      # ==========================================================
-      # 1. RESOLVE APPROVED FOLDER
-      # ==========================================================
-
-      - name: Resolve Approved Folder
-
-        id: request
-
-        shell: pwsh
-
-        env:
-
-          EVENT_NAME: ${{ github.event_name }}
-
-          DISPATCH_EVENT_TYPE: ${{ github.event.action }}
-
-          DISPATCH_FOLDER: ${{ github.event.client_payload.folder_name }}
-
-          MANUAL_FOLDER: ${{ inputs.folder_name }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'GitHub event:'
-          Write-Host $env:EVENT_NAME
-
-          Write-Host 'Repository dispatch event type:'
-          Write-Host $env:DISPATCH_EVENT_TYPE
-
-
-          if ($env:EVENT_NAME -eq 'repository_dispatch') {
-
-              $folderName = $env:DISPATCH_FOLDER
-
-          }
-          else {
-
-              $folderName = $env:MANUAL_FOLDER
-
-          }
-
-
-          if (-not $folderName) {
-
-              throw 'folder_name was not provided.'
-
-          }
-
-
-          $folderName = $folderName.Trim()
-
-
-          if ($folderName -notmatch '^[A-Za-z0-9._() -]+$') {
-
-              throw 'folder_name contains unsupported characters.'
-
-          }
-
-
-          if ($folderName.Contains('..')) {
-
-              throw 'folder_name cannot contain ..'
-
-          }
-
-
-          $folderName = $folderName.Trim('/').Trim('\').Trim()
-
-
-          if (-not $folderName) {
-
-              throw 'folder_name is invalid.'
-
-          }
-
-
-          Write-Host ''
-          Write-Host 'Approved folder:'
-          Write-Host $folderName
-
-
-          "folder_name=$folderName" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 2. VALIDATE SCOUT CONFIGURATION
-      # ==========================================================
-
-      - name: Validate Scout Configuration
-
-        shell: pwsh
-
-        env:
-
-          SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
-
-          SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
-
-          CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
-
-          FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          if (-not $env:SCOUT_URL) {
-
-              throw 'SCOUT_JFROG_URL secret is missing.'
-
-          }
-
-
-          if (-not $env:SCOUT_TOKEN) {
-
-              throw 'SCOUT_JFROG_ACCESS_TOKEN secret is missing.'
-
-          }
-
-
-          if (-not $env:CLONE_REPO) {
-
-              throw 'SCOUT_CLONE_REPO secret is missing.'
-
-          }
-
-
-          if (-not $env:FVP_REPO) {
-
-              throw 'SCOUT_FVP_REPO secret is missing.'
-
-          }
-
-
-          Write-Host 'Scout configuration validated.'
-
-
-      # ==========================================================
-      # 3. SETUP JFROG CLI
-      # ==========================================================
-
-      - name: Setup JFrog CLI
-
+      - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
-
         with:
-
-          disable-auto-build-publish: true
-
-
-      # ==========================================================
-      # 4. VERIFY JFROG CLI
-      # ==========================================================
-
-      - name: Verify JFrog CLI
-
-        shell: pwsh
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          jf --version
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'JFrog CLI is unavailable.'
-
-          }
-
-
-      # ==========================================================
-      # 5. CLEAN OLD CONFIG
-      # ==========================================================
-
-      - name: Cleanup Existing Scout Configuration
-
-        shell: pwsh
-
-        continue-on-error: true
-
-        run: |
-          jf c rm "$env:SCOUT_SERVER_ID" --quiet
-
-
-      # ==========================================================
-      # 6. CONFIGURE SCOUT
-      # ==========================================================
-
-      - name: Configure Scout JFrog
-
-        shell: pwsh
-
+          disable-job-summary: true
         env:
+          JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
-          SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
-
-          SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
-
+      - name: Validate promotion request
+        shell: cmd
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
+          if "%CLONE_REPO%"=="" (
+            echo ERROR: SCOUT_CLONE_REPO is missing.
+            exit /b 1
+          )
 
-          jf c add `
-              "$env:SCOUT_SERVER_ID" `
-              --url="$env:SCOUT_URL" `
-              --access-token="$env:SCOUT_TOKEN" `
-              --interactive=false `
-              --overwrite=true
+          if "%FVP_REPO%"=="" (
+            echo ERROR: SCOUT_FVP_REPO is missing.
+            exit /b 1
+          )
 
+          if "%PROMOTION_PATH%"=="" (
+            echo ERROR: promotion_path is required.
+            exit /b 1
+          )
 
-          if ($LASTEXITCODE -ne 0) {
+          if "%RELEASE_FOLDER%"=="" (
+            echo ERROR: release_folder is required.
+            exit /b 1
+          )
 
-              throw 'Failed to configure Scout JFrog.'
+          echo %PROMOTION_PATH% | findstr /B /I /C:"Official_Release/%RELEASE_FOLDER%/" >nul
 
-          }
+          if errorlevel 1 (
+            echo ERROR: promotion_path must begin with:
+            echo Official_Release/%RELEASE_FOLDER%/
+            echo.
+            echo Received:
+            echo %PROMOTION_PATH%
+            exit /b 1
+          )
 
+          if /I not "%ITEM_TYPE%"=="artifact" (
+            if /I not "%ITEM_TYPE%"=="folder" (
+              echo ERROR: item_type must be artifact or folder.
+              exit /b 1
+            )
+          )
 
-      # ==========================================================
-      # 7. VERIFY SCOUT CONNECTION
-      # ==========================================================
+          jf rt ping
 
-      - name: Verify Scout Connection
+          if errorlevel 1 (
+            echo ERROR: Unable to connect to Scout JFrog.
+            exit /b 1
+          )
 
-        shell: pwsh
+          echo ========================================
+          echo PROMOTION REQUEST VALIDATED
+          echo ========================================
+          echo Clone repository: %CLONE_REPO%
+          echo FVP repository: %FVP_REPO%
+          echo Promotion path: %PROMOTION_PATH%
+          echo Release folder: %RELEASE_FOLDER%
+          echo Item type: %ITEM_TYPE%
 
+      - name: Calculate FVP destination
+        id: destination
+        shell: cmd
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
+          setlocal EnableDelayedExpansion
 
+          set "RELATIVE_PATH=%PROMOTION_PATH:*Official_Release/%RELEASE_FOLDER%/=%"
 
-          jf rt ping `
-              --server-id="$env:SCOUT_SERVER_ID"
+          if "!RELATIVE_PATH!"=="" (
+            echo ERROR: Unable to calculate the FVP relative path.
+            exit /b 1
+          )
 
+          if "!RELATIVE_PATH!"=="%PROMOTION_PATH%" (
+            echo ERROR: Official_Release prefix was not found.
+            exit /b 1
+          )
 
-          if ($LASTEXITCODE -ne 0) {
+          echo relative_path=!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
+          echo fvp_path=%RELEASE_FOLDER%/!RELATIVE_PATH!>>"%GITHUB_OUTPUT%"
 
-              throw 'Scout JFrog connection failed.'
+          echo Relative path:
+          echo !RELATIVE_PATH!
+          echo.
+          echo FVP destination:
+          echo %FVP_REPO%/%RELEASE_FOLDER%/!RELATIVE_PATH!
 
-          }
+          endlocal
 
+      - name: Verify approved artifact exists
+        if: env.ITEM_TYPE == 'artifact'
+        shell: cmd
+        run: |
+          @echo off
 
-          Write-Host 'Scout JFrog connection verified.'
+          jf rt search ^
+            "%CLONE_REPO%/%PROMOTION_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
+          if errorlevel 1 (
+            echo ERROR: Approved artifact was not found in Scout Clone.
+            exit /b 1
+          )
 
-      # ==========================================================
-      # 8. BUILD COPY PATHS
-      # ==========================================================
+          echo Approved artifact exists.
 
-      - name: Build Promotion Paths
+      - name: Verify approved folder exists
+        if: env.ITEM_TYPE == 'folder'
+        shell: cmd
+        run: |
+          @echo off
 
-        id: paths
+          jf rt search ^
+            "%CLONE_REPO%/%PROMOTION_PATH%/*" ^
+            --count=1 ^
+            --fail-no-op=true
 
-        shell: pwsh
+          if errorlevel 1 (
+            echo ERROR: Approved folder was not found in Scout Clone.
+            exit /b 1
+          )
 
+          echo Approved folder exists.
+
+      - name: Promote approved artifact to FVP
+        if: env.ITEM_TYPE == 'artifact'
+        shell: cmd
         env:
-
-          CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
-
-          FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
-
-          FOLDER_NAME: ${{ steps.request.outputs.folder_name }}
-
+          FVP_PATH: ${{ steps.destination.outputs.fvp_path }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          @echo off
 
+          echo ========================================
+          echo PROMOTING APPROVED ARTIFACT TO FVP
+          echo ========================================
+          echo Source:
+          echo %CLONE_REPO%/%PROMOTION_PATH%
+          echo.
+          echo Destination:
+          echo %FVP_REPO%/%FVP_PATH%
+          echo.
 
-          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
+          jf rt copy ^
+            "%CLONE_REPO%/%PROMOTION_PATH%" ^
+            "%FVP_REPO%/%FVP_PATH%" ^
+            --flat=true ^
+            --fail-no-op=true
 
-          $fvpRepo = $env:FVP_REPO.Trim().Trim('/')
+          if errorlevel 1 (
+            echo ERROR: FVP artifact promotion failed.
+            exit /b 1
+          )
 
-          $folderName = $env:FOLDER_NAME.Trim().Trim('/')
+          jf rt search ^
+            "%FVP_REPO%/%FVP_PATH%" ^
+            --count=1 ^
+            --fail-no-op=true
 
+          if errorlevel 1 (
+            echo ERROR: FVP artifact verification failed.
+            exit /b 1
+          )
 
-          if (-not $cloneRepo) {
+          echo.
+          echo FVP ARTIFACT PROMOTION SUCCESSFUL
+          echo Destination:
+          echo %FVP_REPO%/%FVP_PATH%
 
-              throw 'Scout Clone repository is empty.'
-
-          }
-
-
-          if (-not $fvpRepo) {
-
-              throw 'Scout FVP repository is empty.'
-
-          }
-
-
-          if ($cloneRepo -eq $fvpRepo) {
-
-              throw 'Scout Clone and FVP repositories cannot be identical.'
-
-          }
-
-
-          $sourceRoot = "$cloneRepo/$folderName"
-
-          $targetRoot = "$fvpRepo/$folderName"
-
-
-          # Used for verification.
-          $sourceSearchPattern = "$sourceRoot/*"
-
-
-          # Capture everything BELOW folder_name.
-          #
-          # Example:
-          #
-          # clone-repo/POC-001/(**)
-          #
-          # becomes:
-          #
-          # fvp-repo/POC-001/{1}
-          #
-          # This prevents:
-          #
-          # POC-001/POC-001/...
-          $copySourcePattern = "$sourceRoot/(**)"
-
-          $copyTargetPattern = "$targetRoot/{1}"
-
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'FVP PROMOTION PLAN'
-          Write-Host '========================================'
-
-
-          Write-Host 'Folder:'
-          Write-Host $folderName
-
-
-          Write-Host 'Scout Clone source:'
-          Write-Host $sourceRoot
-
-
-          Write-Host 'FVP destination:'
-          Write-Host $targetRoot
-
-
-          Write-Host 'Copy source pattern:'
-          Write-Host $copySourcePattern
-
-
-          Write-Host 'Copy target pattern:'
-          Write-Host $copyTargetPattern
-
-
-          "source_root=$sourceRoot" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-          "target_root=$targetRoot" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-          "source_search_pattern=$sourceSearchPattern" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-          "copy_source_pattern=$copySourcePattern" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-          "copy_target_pattern=$copyTargetPattern" |
-              Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
-                  -Encoding utf8 `
-                  -Append
-
-
-      # ==========================================================
-      # 9. VERIFY SOURCE
-      # ==========================================================
-
-      - name: Verify Scout Clone Source
-
-        shell: pwsh
-
+      - name: Promote approved folder to FVP
+        if: env.ITEM_TYPE == 'folder'
+        shell: cmd
         env:
-
-          SOURCE_PATTERN: ${{ steps.paths.outputs.source_search_pattern }}
-
+          RELATIVE_PATH: ${{ steps.destination.outputs.relative_path }}
         run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          Write-Host 'Verifying Scout Clone:'
-
-          Write-Host $env:SOURCE_PATTERN
-
-
-          jf rt search `
-              "$env:SOURCE_PATTERN" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=true `
-              --include-dirs=false `
-              --fail-no-op=true
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'Approved Scout Clone folder contains no artifacts.'
-
-          }
-
-
-          Write-Host 'Scout Clone source verified.'
-
-
-      # ==========================================================
-      # 10. PREVIEW COPY
-      # ==========================================================
-
-      - name: Preview Scout to FVP Copy
-
-        shell: pwsh
-
-        env:
-
-          COPY_SOURCE_PATTERN: ${{ steps.paths.outputs.copy_source_pattern }}
-
-          COPY_TARGET_PATTERN: ${{ steps.paths.outputs.copy_target_pattern }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'FVP COPY DRY RUN'
-          Write-Host '========================================'
-
-
-          Write-Host 'FROM:'
-          Write-Host $env:COPY_SOURCE_PATTERN
-
-
-          Write-Host 'TO:'
-          Write-Host $env:COPY_TARGET_PATTERN
-
-
-          jf rt copy `
-              "$env:COPY_SOURCE_PATTERN" `
-              "$env:COPY_TARGET_PATTERN" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=false `
-              --flat=true `
-              --dry-run
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'Scout to FVP copy dry run failed.'
-
-          }
-
-
-          Write-Host 'FVP copy preview completed.'
-
-
-      # ==========================================================
-      # 11. COPY TO FVP
-      #
-      # COPY, NOT MOVE.
-      #
-      # Scout Clone remains.
-      # ==========================================================
-
-      - name: Copy Approved Folder to FVP
-
-        shell: pwsh
-
-        env:
-
-          COPY_SOURCE_PATTERN: ${{ steps.paths.outputs.copy_source_pattern }}
-
-          COPY_TARGET_PATTERN: ${{ steps.paths.outputs.copy_target_pattern }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'COPYING APPROVED FOLDER TO FVP'
-          Write-Host '========================================'
-
-
-          Write-Host 'FROM:'
-          Write-Host $env:COPY_SOURCE_PATTERN
-
-
-          Write-Host 'TO:'
-          Write-Host $env:COPY_TARGET_PATTERN
-
-
-          jf rt copy `
-              "$env:COPY_SOURCE_PATTERN" `
-              "$env:COPY_TARGET_PATTERN" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=false `
-              --flat=true `
-              --fail-no-op=true
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'Scout to FVP artifact copy failed.'
-
-          }
-
-
-          Write-Host 'Scout to FVP copy completed.'
-
-
-      # ==========================================================
-      # 12. VERIFY FVP
-      # ==========================================================
-
-      - name: Verify FVP Destination
-
-        shell: pwsh
-
-        env:
-
-          TARGET_ROOT: ${{ steps.paths.outputs.target_root }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          $targetPattern = "$env:TARGET_ROOT/*"
-
-
-          Write-Host 'Verifying FVP:'
-
-          Write-Host $targetPattern
-
-
-          jf rt search `
-              "$targetPattern" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=true `
-              --include-dirs=false `
-              --fail-no-op=true
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'FVP verification failed.'
-
-          }
-
-
-          Write-Host 'FVP destination verified.'
-
-
-      # ==========================================================
-      # 13. VERIFY CLONE REMAINS
-      # ==========================================================
-
-      - name: Verify Scout Clone Remains
-
-        shell: pwsh
-
-        env:
-
-          SOURCE_ROOT: ${{ steps.paths.outputs.source_root }}
-
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-
-          $sourcePattern = "$env:SOURCE_ROOT/*"
-
-
-          Write-Host 'Verifying Scout Clone remains:'
-
-          Write-Host $sourcePattern
-
-
-          jf rt search `
-              "$sourcePattern" `
-              --server-id="$env:SCOUT_SERVER_ID" `
-              --recursive=true `
-              --include-dirs=false `
-              --fail-no-op=true
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-              throw 'Scout Clone source is missing after FVP copy.'
-
-          }
-
-
-          Write-Host 'Scout Clone remains available.'
-
-
-      # ==========================================================
-      # 14. SUMMARY
-      # ==========================================================
-
-      - name: Promotion Summary
-
-        if: success()
-
-        shell: pwsh
-
-        env:
-
-          FOLDER_NAME: ${{ steps.request.outputs.folder_name }}
-
-          SOURCE_ROOT: ${{ steps.paths.outputs.source_root }}
-
-          TARGET_ROOT: ${{ steps.paths.outputs.target_root }}
-
-        run: |
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'FVP PROMOTION SUCCESSFUL'
-          Write-Host '========================================'
-
-
-          Write-Host 'Folder:'
-          Write-Host $env:FOLDER_NAME
-
-
-          Write-Host 'Scout Clone:'
-          Write-Host $env:SOURCE_ROOT
-
-
-          Write-Host 'FVP:'
-          Write-Host $env:TARGET_ROOT
-
-
-          Write-Host 'Scout Clone status:'
-          Write-Host 'AVAILABLE'
-
-
-          Write-Host 'FVP status:'
-          Write-Host 'PUBLISHED'
-
-
-          Write-Host 'Operation:'
-          Write-Host 'COPY'
-
-
-      # ==========================================================
-      # 15. CLEANUP
-      # ==========================================================
-
-      - name: Cleanup Scout Configuration
-
-        if: always()
-
-        shell: pwsh
-
-        continue-on-error: true
-
-        run: |
-          jf c rm "$env:SCOUT_SERVER_ID" --quiet
-
-          Write-Host 'Scout JFrog configuration removed.'
+          @echo off
+
+          echo ========================================
+          echo PROMOTING APPROVED FOLDER TO FVP
+          echo ========================================
+          echo Source:
+          echo %CLONE_REPO%/%PROMOTION_PATH%/
+          echo.
+          echo Destination:
+          echo %FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/
+          echo.
+
+          jf rt copy ^
+            "%CLONE_REPO%/%PROMOTION_PATH%/(*)" ^
+            "%FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/{1}" ^
+            --flat=true ^
+            --recursive=true ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: FVP folder promotion failed.
+            exit /b 1
+          )
+
+          jf rt search ^
+            "%FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/*" ^
+            --count=1 ^
+            --fail-no-op=true
+
+          if errorlevel 1 (
+            echo ERROR: FVP folder verification failed.
+            exit /b 1
+          )
+
+          echo.
+          echo FVP FOLDER PROMOTION SUCCESSFUL
+          echo Destination:
+          echo %FVP_REPO%/%RELEASE_FOLDER%/%RELATIVE_PATH%/
