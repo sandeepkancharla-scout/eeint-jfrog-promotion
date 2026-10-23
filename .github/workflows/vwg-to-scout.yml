@@ -9,7 +9,7 @@ on:
         type: string
 
       build_type:
-        description: "Build type"
+        description: "Select build type"
         required: true
         default: nightly
         type: choice
@@ -26,8 +26,8 @@ permissions:
   contents: read
 
 jobs:
-  vwg-to-scout:
-    name: VWG to Scout Clone
+  transfer:
+    name: Transfer VWG Artifact to Scout Clone
     runs-on: self-hosted
     timeout-minutes: 60
 
@@ -47,7 +47,6 @@ jobs:
       STAGING_DIR: ${{ runner.temp }}\vwg-scout-${{ github.run_id }}
 
     steps:
-
       - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
 
@@ -62,39 +61,82 @@ jobs:
           )
 
           if "%VWG_URL%"=="" (
-            echo ERROR: VWG_JFROG_URL secret is missing.
+            echo ERROR: VWG_JFROG_URL is missing.
             exit /b 1
           )
 
           if "%VWG_TOKEN%"=="" (
-            echo ERROR: VWG_JFROG_ACCESS_TOKEN secret is missing.
+            echo ERROR: VWG_JFROG_ACCESS_TOKEN is missing.
             exit /b 1
           )
 
           if "%SCOUT_URL%"=="" (
-            echo ERROR: SCOUT_JFROG_URL secret is missing.
+            echo ERROR: SCOUT_JFROG_URL is missing.
             exit /b 1
           )
 
           if "%SCOUT_TOKEN%"=="" (
-            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN secret is missing.
+            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN is missing.
             exit /b 1
           )
 
           if "%CLONE_REPO%"=="" (
-            echo ERROR: SCOUT_CLONE_REPO secret is missing.
+            echo ERROR: SCOUT_CLONE_REPO is missing.
             exit /b 1
           )
 
           if /I "%BUILD_TYPE%"=="official" (
             if "%RELEASE_FOLDER%"=="" (
-              echo ERROR: Release/CW number is required for Official releases.
+              echo ERROR: Release/CW number is required for Official.
               exit /b 1
             )
           )
 
-          echo Input validation successful.
-          echo Build Type: %BUILD_TYPE%
+          echo Validation successful.
+
+      - name: Parse VWG URL
+        id: parse
+        shell: cmd
+        run: |
+          @echo off
+          setlocal EnableDelayedExpansion
+
+          set "FULL_URL=%FILE_URL%"
+          set "PREFIX=%VWG_URL%/artifactory/"
+          set "RELATIVE=!FULL_URL:%VWG_URL%/artifactory/=!"
+
+          if "!RELATIVE!"=="!FULL_URL!" (
+            echo ERROR: Invalid VWG JFrog URL.
+            echo Expected:
+            echo %VWG_URL%/artifactory/REPOSITORY/PATH/FILE
+            exit /b 1
+          )
+
+          for /f "tokens=1,* delims=/" %%A in ("!RELATIVE!") do (
+            set "SOURCE_REPO=%%A"
+            set "SOURCE_PATH=%%B"
+          )
+
+          if "!SOURCE_REPO!"=="" (
+            echo ERROR: Could not determine VWG repository.
+            exit /b 1
+          )
+
+          if "!SOURCE_PATH!"=="" (
+            echo ERROR: Could not determine VWG artifact path.
+            exit /b 1
+          )
+
+          echo Source repository:
+          echo !SOURCE_REPO!
+
+          echo Source path:
+          echo !SOURCE_PATH!
+
+          echo source_repo=!SOURCE_REPO!>>"%GITHUB_OUTPUT%"
+          echo source_path=!SOURCE_PATH!>>"%GITHUB_OUTPUT%"
+
+          endlocal
 
       - name: Configure VWG JFrog
         shell: cmd
@@ -148,56 +190,7 @@ jobs:
 
           echo Scout JFrog connection successful.
 
-      - name: Parse VWG URL
-        id: parse
-        shell: cmd
-        run: |
-          @echo off
-          setlocal EnableDelayedExpansion
-
-          set "FULL_URL=%FILE_URL%"
-          set "PREFIX=%VWG_URL%/artifactory/"
-
-          set "RELATIVE=!FULL_URL:%VWG_URL%/artifactory/=!"
-
-          if "!RELATIVE!"=="!FULL_URL!" (
-            echo ERROR: Invalid VWG JFrog URL.
-            echo.
-            echo Expected:
-            echo %VWG_URL%/artifactory/REPOSITORY/PATH/FILE
-            exit /b 1
-          )
-
-          for /f "tokens=1,* delims=/" %%A in ("!RELATIVE!") do (
-            set "SOURCE_REPO=%%A"
-            set "SOURCE_PATH=%%B"
-          )
-
-          if "!SOURCE_REPO!"=="" (
-            echo ERROR: Could not determine source repository.
-            exit /b 1
-          )
-
-          if "!SOURCE_PATH!"=="" (
-            echo ERROR: Could not determine source artifact path.
-            exit /b 1
-          )
-
-          for %%F in ("!SOURCE_PATH!") do (
-            set "FILE_NAME=%%~nxF"
-          )
-
-          echo Source Repository: !SOURCE_REPO!
-          echo Source Path: !SOURCE_PATH!
-          echo File Name: !FILE_NAME!
-
-          echo source_repo=!SOURCE_REPO!>>"%GITHUB_OUTPUT%"
-          echo source_path=!SOURCE_PATH!>>"%GITHUB_OUTPUT%"
-          echo file_name=!FILE_NAME!>>"%GITHUB_OUTPUT%"
-
-          endlocal
-
-      - name: Create temporary directory
+      - name: Prepare local temporary folder
         shell: cmd
         run: |
           @echo off
@@ -209,23 +202,20 @@ jobs:
           mkdir "%STAGING_DIR%"
 
           if errorlevel 1 (
-            echo ERROR: Could not create temporary directory.
+            echo ERROR: Could not create temporary folder.
             exit /b 1
           )
 
-          echo Temporary directory created:
+          echo Temporary folder:
           echo %STAGING_DIR%
 
-      - name: Verify source artifact in VWG
+      - name: Verify VWG artifact
         shell: cmd
         env:
           SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
           SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
         run: |
           @echo off
-
-          echo Checking VWG artifact:
-          echo %SOURCE_REPO%/%SOURCE_PATH%
 
           jf rt search ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
@@ -238,9 +228,9 @@ jobs:
             exit /b 1
           )
 
-          echo Source artifact exists.
+          echo VWG artifact found.
 
-      - name: Download from VWG
+      - name: Download VWG artifact to local temp
         shell: cmd
         env:
           SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
@@ -248,14 +238,10 @@ jobs:
         run: |
           @echo off
 
-          echo ========================================
-          echo VWG DOWNLOAD
-          echo ========================================
-
-          echo Source:
+          echo Downloading:
           echo %SOURCE_REPO%/%SOURCE_PATH%
 
-          echo Local temporary folder:
+          echo To:
           echo %STAGING_DIR%
 
           jf rt download ^
@@ -270,9 +256,9 @@ jobs:
             exit /b 1
           )
 
-          echo VWG download successful.
+          echo Download successful.
 
-      - name: Calculate destination
+      - name: Calculate Scout destination
         id: destination
         shell: cmd
         env:
@@ -298,22 +284,18 @@ jobs:
             exit /b 0
           )
 
-          echo ERROR: Unknown build type.
+          echo ERROR: Invalid build type.
           exit /b 1
 
       - name: Upload Nightly to Scout Clone
-        if: inputs.build_type == 'nightly'
+        if: ${{ inputs.build_type == 'nightly' }}
         shell: cmd
         env:
           DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
         run: |
           @echo off
 
-          echo ========================================
-          echo NIGHTLY BUILD
-          echo ========================================
-
-          echo Destination:
+          echo Uploading Nightly build to:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -335,31 +317,22 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly destination verification failed.
+            echo ERROR: Nightly verification failed.
             exit /b 1
           )
 
-          echo.
           echo Nightly transfer successful.
-          echo.
-          echo Final location:
-          echo %CLONE_REPO%/%DESTINATION_PATH%
-          echo.
           echo No FVP approval required.
 
       - name: Upload Official to Scout Clone
-        if: inputs.build_type == 'official'
+        if: ${{ inputs.build_type == 'official' }}
         shell: cmd
         env:
           DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
         run: |
           @echo off
 
-          echo ========================================
-          echo OFFICIAL RELEASE
-          echo ========================================
-
-          echo Destination:
+          echo Uploading Official release to:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
           jf rt upload ^
@@ -381,18 +354,14 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official destination verification failed.
+            echo ERROR: Official verification failed.
             exit /b 1
           )
 
-          echo.
           echo Official transfer successful.
-          echo.
-          echo Final location:
-          echo %CLONE_REPO%/%DESTINATION_PATH%
 
       - name: Request FVP approval
-        if: success() && inputs.build_type == 'official'
+        if: ${{ success() && inputs.build_type == 'official' }}
         shell: cmd
         env:
           APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
@@ -407,7 +376,7 @@ jobs:
             exit /b 1
           )
 
-          echo Sending FVP approval request.
+          echo Sending FVP approval request...
 
           curl.exe ^
             --fail-with-body ^
@@ -425,15 +394,11 @@ jobs:
 
           echo FVP approval request submitted successfully.
 
-      - name: Cleanup temporary files
-        if: always()
+      - name: Cleanup local temporary files
+        if: ${{ always() }}
         shell: cmd
         run: |
           @echo off
-
-          echo ========================================
-          echo CLEANUP
-          echo ========================================
 
           if exist "%STAGING_DIR%" (
             rmdir /S /Q "%STAGING_DIR%"
@@ -442,5 +407,4 @@ jobs:
           jf c remove vwg-source --quiet >nul 2>&1
           jf c remove scout-target --quiet >nul 2>&1
 
-          echo Local temporary files deleted.
-          echo JFrog temporary configurations removed.
+          echo Cleanup complete.
