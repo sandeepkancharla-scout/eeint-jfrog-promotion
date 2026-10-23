@@ -3,32 +3,18 @@ name: VWG to Scout Clone
 run-name: >-
   VWG to Scout Clone |
   ${{ inputs.build_type }} |
-  ${{ inputs.source_repo }}/${{ inputs.source_path }}
+  ${{ inputs.file_url }}
 
 on:
   workflow_dispatch:
     inputs:
-      source_repo:
-        description: "VWG source repository key, for example vw-build-binaries"
+      file_url:
+        description: "VWG JFrog file URL"
         required: true
         type: string
-
-      source_path:
-        description: "Artifact or folder path inside the VWG repository"
-        required: true
-        type: string
-
-      item_type:
-        description: "Select whether the source is an artifact or folder"
-        required: true
-        default: artifact
-        type: choice
-        options:
-          - artifact
-          - folder
 
       build_type:
-        description: "Select the build type"
+        description: "Select Nightly or Official release"
         required: true
         default: nightly
         type: choice
@@ -37,7 +23,7 @@ on:
           - official
 
       release_folder:
-        description: "Required only for Official builds, for example 221 or CW43"
+        description: "Release / CW number - required only for Official"
         required: false
         type: string
 
@@ -45,23 +31,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: >-
-    vwg-to-scout-${{
-      inputs.source_repo
-    }}-${{
-      inputs.source_path
-    }}-${{
-      inputs.build_type
-    }}
+  group: vwg-to-scout-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   transfer-to-scout:
-    name: Transfer VWG artifact to Scout Clone
+    name: Transfer VWG File to Scout Clone
     runs-on: self-hosted
-    timeout-minutes: 90
+    timeout-minutes: 15
 
     env:
+      FILE_URL: ${{ inputs.file_url }}
+      BUILD_TYPE: ${{ inputs.build_type }}
+      RELEASE_FOLDER: ${{ inputs.release_folder }}
+
       VWG_URL: ${{ secrets.VWG_JFROG_URL }}
       VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
 
@@ -70,96 +53,127 @@ jobs:
 
       CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
 
-      SOURCE_REPO: ${{ inputs.source_repo }}
-      SOURCE_PATH: ${{ inputs.source_path }}
-      ITEM_TYPE: ${{ inputs.item_type }}
-      BUILD_TYPE: ${{ inputs.build_type }}
-      RELEASE_FOLDER: ${{ inputs.release_folder }}
-
       STAGING_DIR: ${{ runner.temp }}\vwg-scout-${{ github.run_id }}
 
     steps:
+
       - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
         with:
           disable-job-summary: true
 
-      - name: Validate inputs and secrets
+      # =====================================================
+      # VALIDATE INPUTS
+      # =====================================================
+
+      - name: Validate inputs
         shell: cmd
         run: |
           @echo off
 
-          if "%VWG_URL%"=="" (
-            echo ERROR: VWG_JFROG_URL is missing.
+          if "%FILE_URL%"=="" (
+            echo ERROR: VWG file URL is required.
             exit /b 1
-          )
-
-          if "%VWG_TOKEN%"=="" (
-            echo ERROR: VWG_JFROG_ACCESS_TOKEN is missing.
-            exit /b 1
-          )
-
-          if "%SCOUT_URL%"=="" (
-            echo ERROR: SCOUT_JFROG_URL is missing.
-            exit /b 1
-          )
-
-          if "%SCOUT_TOKEN%"=="" (
-            echo ERROR: SCOUT_JFROG_ACCESS_TOKEN is missing.
-            exit /b 1
-          )
-
-          if "%CLONE_REPO%"=="" (
-            echo ERROR: SCOUT_CLONE_REPO is missing.
-            exit /b 1
-          )
-
-          if "%SOURCE_REPO%"=="" (
-            echo ERROR: source_repo is required.
-            exit /b 1
-          )
-
-          if "%SOURCE_PATH%"=="" (
-            echo ERROR: source_path is required.
-            exit /b 1
-          )
-
-          if /I not "%ITEM_TYPE%"=="artifact" (
-            if /I not "%ITEM_TYPE%"=="folder" (
-              echo ERROR: item_type must be artifact or folder.
-              exit /b 1
-            )
           )
 
           if /I not "%BUILD_TYPE%"=="nightly" (
             if /I not "%BUILD_TYPE%"=="official" (
-              echo ERROR: build_type must be nightly or official.
+              echo ERROR: Build type must be nightly or official.
               exit /b 1
             )
           )
 
           if /I "%BUILD_TYPE%"=="official" (
             if "%RELEASE_FOLDER%"=="" (
-              echo ERROR: release_folder is required for Official builds.
+              echo ERROR: Release / CW number is required for Official releases.
               exit /b 1
             )
           )
 
           echo ========================================
-          echo INPUT VALIDATION SUCCESSFUL
+          echo INPUTS
           echo ========================================
-          echo Source repository: %SOURCE_REPO%
-          echo Source path: %SOURCE_PATH%
-          echo Item type: %ITEM_TYPE%
-          echo Build type: %BUILD_TYPE%
+          echo VWG File URL:
+          echo %FILE_URL%
+          echo.
+          echo Build Type:
+          echo %BUILD_TYPE%
 
           if /I "%BUILD_TYPE%"=="official" (
-            echo Release folder: %RELEASE_FOLDER%
+            echo Release / CW:
+            echo %RELEASE_FOLDER%
           ) else (
-            echo Release folder: Not required
+            echo Release / CW:
+            echo Not required for Nightly
           )
 
-      - name: Configure VWG and Scout JFrog connections
+      # =====================================================
+      # PARSE VWG URL
+      # =====================================================
+
+      - name: Parse VWG file URL
+        id: parse
+        shell: cmd
+        run: |
+          @echo off
+          setlocal EnableDelayedExpansion
+
+          set "FULL_URL=%FILE_URL%"
+
+          set "PREFIX=https://jfrog.rivianvw.io/artifactory/"
+
+          set "RELATIVE=!FULL_URL:%PREFIX%=!"
+
+          if "!RELATIVE!"=="!FULL_URL!" (
+            echo ERROR: The provided URL is not a supported VWG Artifactory URL.
+            echo.
+            echo Expected format:
+            echo https://jfrog.rivianvw.io/artifactory/REPOSITORY/PATH/FILE
+            exit /b 1
+          )
+
+          for /f "tokens=1,* delims=/" %%A in ("!RELATIVE!") do (
+            set "SOURCE_REPO=%%A"
+            set "SOURCE_PATH=%%B"
+          )
+
+          if "!SOURCE_REPO!"=="" (
+            echo ERROR: Unable to determine VWG repository from URL.
+            exit /b 1
+          )
+
+          if "!SOURCE_PATH!"=="" (
+            echo ERROR: Unable to determine artifact path from URL.
+            exit /b 1
+          )
+
+          for %%F in ("!SOURCE_PATH!") do (
+            set "FILE_NAME=%%~nxF"
+          )
+
+          echo ========================================
+          echo PARSED VWG SOURCE
+          echo ========================================
+          echo Repository:
+          echo !SOURCE_REPO!
+          echo.
+          echo Artifact Path:
+          echo !SOURCE_PATH!
+          echo.
+          echo File Name:
+          echo !FILE_NAME!
+
+          echo source_repo=!SOURCE_REPO!>>"%GITHUB_OUTPUT%"
+          echo source_path=!SOURCE_PATH!>>"%GITHUB_OUTPUT%"
+          echo file_name=!FILE_NAME!>>"%GITHUB_OUTPUT%"
+
+          endlocal
+
+      # =====================================================
+      # CONFIGURE BOTH JFROG INSTANCES
+      # =====================================================
+
+      - name: Configure VWG and Scout JFrog
         shell: cmd
         run: |
           @echo off
@@ -187,7 +201,14 @@ jobs:
             exit /b 1
           )
 
-          echo Testing VWG JFrog connection...
+      # =====================================================
+      # TEST CONNECTIONS
+      # =====================================================
+
+      - name: Test VWG JFrog connection
+        shell: cmd
+        run: |
+          @echo off
 
           jf rt ping --server-id=vwg-source
 
@@ -196,7 +217,12 @@ jobs:
             exit /b 1
           )
 
-          echo Testing Scout JFrog connection...
+          echo VWG JFrog connection successful.
+
+      - name: Test Scout JFrog connection
+        shell: cmd
+        run: |
+          @echo off
 
           jf rt ping --server-id=scout-target
 
@@ -205,7 +231,11 @@ jobs:
             exit /b 1
           )
 
-          echo Both JFrog connections are working.
+          echo Scout JFrog connection successful.
+
+      # =====================================================
+      # CREATE TEMP STAGING DIRECTORY
+      # =====================================================
 
       - name: Prepare staging directory
         shell: cmd
@@ -223,14 +253,20 @@ jobs:
             exit /b 1
           )
 
-          echo Staging directory:
-          echo %STAGING_DIR%
+      # =====================================================
+      # CHECK SOURCE EXISTS
+      # =====================================================
 
       - name: Verify VWG artifact exists
-        if: inputs.item_type == 'artifact'
         shell: cmd
+        env:
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
+          SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
         run: |
           @echo off
+
+          echo Checking:
+          echo %SOURCE_REPO%/%SOURCE_PATH%
 
           jf rt search ^
             "%SOURCE_REPO%/%SOURCE_PATH%" ^
@@ -239,43 +275,26 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: VWG artifact was not found.
-            echo Source:
-            echo %SOURCE_REPO%/%SOURCE_PATH%
+            echo ERROR: Artifact does not exist in VWG JFrog.
             exit /b 1
           )
 
-          echo VWG artifact exists.
+          echo VWG artifact found.
 
-      - name: Verify VWG folder exists
-        if: inputs.item_type == 'folder'
-        shell: cmd
-        run: |
-          @echo off
-
-          jf rt search ^
-            "%SOURCE_REPO%/%SOURCE_PATH%/*" ^
-            --server-id=vwg-source ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: VWG folder was not found or is empty.
-            echo Source:
-            echo %SOURCE_REPO%/%SOURCE_PATH%/
-            exit /b 1
-          )
-
-          echo VWG folder exists.
+      # =====================================================
+      # DOWNLOAD FROM VWG
+      # =====================================================
 
       - name: Download artifact from VWG
-        if: inputs.item_type == 'artifact'
         shell: cmd
+        env:
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
+          SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
         run: |
           @echo off
 
           echo ========================================
-          echo DOWNLOADING ARTIFACT FROM VWG
+          echo DOWNLOADING FROM VWG
           echo ========================================
           echo Source:
           echo %SOURCE_REPO%/%SOURCE_PATH%
@@ -289,51 +308,30 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: VWG artifact download failed.
+            echo ERROR: VWG download failed.
             exit /b 1
           )
 
-          echo Artifact downloaded successfully.
+          echo VWG download successful.
 
-      - name: Download folder from VWG
-        if: inputs.item_type == 'folder'
-        shell: cmd
-        run: |
-          @echo off
-
-          echo ========================================
-          echo DOWNLOADING FOLDER FROM VWG
-          echo ========================================
-          echo Source:
-          echo %SOURCE_REPO%/%SOURCE_PATH%/
-          echo.
-
-          jf rt download ^
-            "%SOURCE_REPO%/%SOURCE_PATH%/(*)" ^
-            "%STAGING_DIR%/{1}" ^
-            --server-id=vwg-source ^
-            --flat=true ^
-            --recursive=true ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: VWG folder download failed.
-            exit /b 1
-          )
-
-          echo Folder downloaded successfully.
+      # =====================================================
+      # CALCULATE DESTINATION
+      # =====================================================
 
       - name: Calculate Scout Clone destination
         id: destination
         shell: cmd
+        env:
+          SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
         run: |
           @echo off
 
           if /I "%BUILD_TYPE%"=="nightly" (
             echo destination_path=Daily_Builds/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo Build type: Nightly
-            echo Destination:
+            echo ========================================
+            echo NIGHTLY DESTINATION
+            echo ========================================
             echo %CLONE_REPO%/Daily_Builds/%SOURCE_PATH%
 
             exit /b 0
@@ -342,9 +340,9 @@ jobs:
           if /I "%BUILD_TYPE%"=="official" (
             echo destination_path=Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%>>"%GITHUB_OUTPUT%"
 
-            echo Build type: Official
-            echo Release folder: %RELEASE_FOLDER%
-            echo Destination:
+            echo ========================================
+            echo OFFICIAL DESTINATION
+            echo ========================================
             echo %CLONE_REPO%/Official_Release/%RELEASE_FOLDER%/%SOURCE_PATH%
 
             exit /b 0
@@ -353,8 +351,12 @@ jobs:
           echo ERROR: Unsupported build type.
           exit /b 1
 
+      # =====================================================
+      # NIGHTLY
+      # =====================================================
+
       - name: Upload Nightly artifact to Scout Clone
-        if: inputs.build_type == 'nightly' && inputs.item_type == 'artifact'
+        if: inputs.build_type == 'nightly'
         shell: cmd
         env:
           DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
@@ -362,7 +364,7 @@ jobs:
           @echo off
 
           echo ========================================
-          echo UPLOADING NIGHTLY ARTIFACT
+          echo UPLOADING NIGHTLY BUILD
           echo ========================================
           echo Destination:
           echo %CLONE_REPO%/%DESTINATION_PATH%
@@ -376,7 +378,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly artifact upload failed.
+            echo ERROR: Nightly upload failed.
             exit /b 1
           )
 
@@ -387,65 +389,24 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Nightly artifact verification failed.
+            echo ERROR: Nightly destination verification failed.
             exit /b 1
           )
 
           echo.
-          echo NIGHTLY ARTIFACT TRANSFER SUCCESSFUL
-          echo Destination:
+          echo ========================================
+          echo NIGHTLY TRANSFER SUCCESSFUL
+          echo ========================================
           echo %CLONE_REPO%/%DESTINATION_PATH%
           echo.
-          echo No FVP approval is required.
+          echo No FVP approval required.
 
-      - name: Upload Nightly folder to Scout Clone
-        if: inputs.build_type == 'nightly' && inputs.item_type == 'folder'
-        shell: cmd
-        env:
-          DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
-        run: |
-          @echo off
-
-          echo ========================================
-          echo UPLOADING NIGHTLY FOLDER
-          echo ========================================
-          echo Destination:
-          echo %CLONE_REPO%/%DESTINATION_PATH%/
-          echo.
-
-          jf rt upload ^
-            "%STAGING_DIR%\(*)" ^
-            "%CLONE_REPO%/%DESTINATION_PATH%/{1}" ^
-            --server-id=scout-target ^
-            --flat=true ^
-            --recursive=true ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Nightly folder upload failed.
-            exit /b 1
-          )
-
-          jf rt search ^
-            "%CLONE_REPO%/%DESTINATION_PATH%/*" ^
-            --server-id=scout-target ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Nightly folder verification failed.
-            exit /b 1
-          )
-
-          echo.
-          echo NIGHTLY FOLDER TRANSFER SUCCESSFUL
-          echo Destination:
-          echo %CLONE_REPO%/%DESTINATION_PATH%/
-          echo.
-          echo No FVP approval is required.
+      # =====================================================
+      # OFFICIAL
+      # =====================================================
 
       - name: Upload Official artifact to Scout Clone
-        if: inputs.build_type == 'official' && inputs.item_type == 'artifact'
+        if: inputs.build_type == 'official'
         shell: cmd
         env:
           DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
@@ -453,7 +414,7 @@ jobs:
           @echo off
 
           echo ========================================
-          echo UPLOADING OFFICIAL ARTIFACT
+          echo UPLOADING OFFICIAL RELEASE
           echo ========================================
           echo Destination:
           echo %CLONE_REPO%/%DESTINATION_PATH%
@@ -467,7 +428,7 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official artifact upload failed.
+            echo ERROR: Official upload failed.
             exit /b 1
           )
 
@@ -478,58 +439,24 @@ jobs:
             --fail-no-op=true
 
           if errorlevel 1 (
-            echo ERROR: Official artifact verification failed.
+            echo ERROR: Official destination verification failed.
             exit /b 1
           )
 
-          echo OFFICIAL ARTIFACT TRANSFER SUCCESSFUL
-
-      - name: Upload Official folder to Scout Clone
-        if: inputs.build_type == 'official' && inputs.item_type == 'folder'
-        shell: cmd
-        env:
-          DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
-        run: |
-          @echo off
-
-          echo ========================================
-          echo UPLOADING OFFICIAL FOLDER
-          echo ========================================
-          echo Destination:
-          echo %CLONE_REPO%/%DESTINATION_PATH%/
           echo.
+          echo OFFICIAL RELEASE TRANSFER SUCCESSFUL.
 
-          jf rt upload ^
-            "%STAGING_DIR%\(*)" ^
-            "%CLONE_REPO%/%DESTINATION_PATH%/{1}" ^
-            --server-id=scout-target ^
-            --flat=true ^
-            --recursive=true ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Official folder upload failed.
-            exit /b 1
-          )
-
-          jf rt search ^
-            "%CLONE_REPO%/%DESTINATION_PATH%/*" ^
-            --server-id=scout-target ^
-            --count=1 ^
-            --fail-no-op=true
-
-          if errorlevel 1 (
-            echo ERROR: Official folder verification failed.
-            exit /b 1
-          )
-
-          echo OFFICIAL FOLDER TRANSFER SUCCESSFUL
+      # =====================================================
+      # OFFICIAL ONLY: REQUEST FVP APPROVAL
+      # =====================================================
 
       - name: Request FVP approval
         if: success() && inputs.build_type == 'official'
         shell: cmd
         env:
           APPROVAL_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
+          SOURCE_PATH: ${{ steps.parse.outputs.source_path }}
           DESTINATION_PATH: ${{ steps.destination.outputs.destination_path }}
         run: |
           @echo off
@@ -547,7 +474,7 @@ jobs:
             --show-error ^
             --request POST ^
             --header "Content-Type: application/json" ^
-            --data "{\"request_type\":\"official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%RELEASE_FOLDER%\",\"promotion_path\":\"%DESTINATION_PATH%\",\"requested_by\":\"${{ github.actor }}\",\"item_type\":\"%ITEM_TYPE%\"}" ^
+            --data "{\"request_type\":\"official_fvp_approval\",\"source_repo\":\"%SOURCE_REPO%\",\"source_path\":\"%SOURCE_PATH%\",\"clone_repo\":\"%CLONE_REPO%\",\"build_type\":\"official\",\"calendar_week\":\"%RELEASE_FOLDER%\",\"promotion_path\":\"%DESTINATION_PATH%\",\"requested_by\":\"${{ github.actor }}\",\"item_type\":\"artifact\"}" ^
             "%APPROVAL_URL%"
 
           if errorlevel 1 (
@@ -557,10 +484,15 @@ jobs:
 
           echo.
           echo FVP approval request submitted successfully.
-          echo Scout Clone path:
+          echo.
+          echo Scout Clone artifact:
           echo %CLONE_REPO%/%DESTINATION_PATH%
 
-      - name: Clean staging directory
+      # =====================================================
+      # CLEANUP
+      # =====================================================
+
+      - name: Cleanup
         if: always()
         shell: cmd
         run: |
@@ -573,4 +505,4 @@ jobs:
           jf c remove vwg-source --quiet >nul 2>&1
           jf c remove scout-target --quiet >nul 2>&1
 
-          echo Staging directory and temporary JFrog configurations removed.
+          echo Cleanup complete.
