@@ -38,7 +38,7 @@ jobs:
   transfer-to-scout:
     name: Transfer VWG File to Scout Clone
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 60
 
     env:
       FILE_URL: ${{ inputs.file_url }}
