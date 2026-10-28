@@ -27,15 +27,6 @@ on:
         required: true
         type: string
 
-      official_type:
-        description: "For Official select Release. For Daily select N/A"
-        required: true
-        default: "N/A"
-        type: choice
-        options:
-          - "N/A"
-          - "Release"
-
 permissions:
   contents: read
 
@@ -64,7 +55,6 @@ jobs:
       FOLDER_URL: ${{ inputs.folder_url }}
       BUILD_TYPE: ${{ inputs.build_type }}
       CALENDAR_WEEK: ${{ inputs.calendar_week }}
-      OFFICIAL_TYPE: ${{ inputs.official_type }}
 
       VWG_URL: ${{ secrets.VWG_JFROG_URL }}
       VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
@@ -93,7 +83,7 @@ jobs:
           disable-auto-build-publish: true
 
       # ==========================================================
-      # 2. CREATE TEMPORARY DIRECTORY
+      # 2. SET TEMPORARY DIRECTORY
       # ==========================================================
 
       - name: Set temporary directory
@@ -159,31 +149,24 @@ jobs:
 
               if ($dailyDate -notmatch '^\d{4}-\d{2}-\d{2}$') {
                   throw (
-                      'For Daily builds, Calendar Week must contain ' +
-                      'a date in YYYY-MM-DD format.'
+                      'For Daily builds, enter a date using ' +
+                      'YYYY-MM-DD format, for example 2026-10-28.'
                   )
               }
 
               try {
-                  $parsedDate = [datetime]::ParseExact(
+                  [void][datetime]::ParseExact(
                       $dailyDate,
                       'yyyy-MM-dd',
                       [System.Globalization.CultureInfo]::InvariantCulture
                   )
               }
               catch {
-                  throw 'The supplied Daily build date is invalid.'
-              }
-
-              if (
-                  $env:OFFICIAL_TYPE -and
-                  $env:OFFICIAL_TYPE -ne 'N/A'
-              ) {
-                  throw 'Official Type must be N/A for Daily builds.'
+                  throw 'The Daily build date is invalid.'
               }
 
               Write-Host ''
-              Write-Host 'Build Type: Daily'
+              Write-Host 'Build Type: DAILY'
               Write-Host "Daily Date: $dailyDate"
           }
 
@@ -195,12 +178,8 @@ jobs:
               if ($calendarWeek -notmatch '^CW[0-9]{1,2}$') {
                   throw (
                       'For Official builds, Calendar Week must use ' +
-                      'the format CW29, CW35, CW41, etc.'
+                      'CW format, for example CW29.'
                   )
-              }
-
-              if ($env:OFFICIAL_TYPE -ne 'Release') {
-                  throw 'Official Type must be Release.'
               }
 
               if (-not $env:APPROVAL_URL) {
@@ -211,9 +190,8 @@ jobs:
               }
 
               Write-Host ''
-              Write-Host 'Build Type: Official'
+              Write-Host 'Build Type: OFFICIAL RELEASE'
               Write-Host "Calendar Week: $calendarWeek"
-              Write-Host 'Official Type: Release'
           }
 
           Write-Host ''
@@ -244,7 +222,8 @@ jobs:
               throw 'Failed to configure VWG JFrog.'
           }
 
-          jf rt ping --server-id="$env:VWG_SERVER_ID"
+          jf rt ping `
+              --server-id="$env:VWG_SERVER_ID"
 
           if ($LASTEXITCODE -ne 0) {
               throw 'Cannot connect to VWG JFrog.'
@@ -274,7 +253,8 @@ jobs:
               throw 'Failed to configure Scout JFrog.'
           }
 
-          jf rt ping --server-id="$env:SCOUT_SERVER_ID"
+          jf rt ping `
+              --server-id="$env:SCOUT_SERVER_ID"
 
           if ($LASTEXITCODE -ne 0) {
               throw 'Cannot connect to Scout JFrog.'
@@ -284,6 +264,19 @@ jobs:
 
       # ==========================================================
       # 6. PARSE VWG FOLDER URL
+      #
+      # Example:
+      #
+      # URL:
+      # https://host/artifactory/
+      # vw-group-commit-vault/
+      # ff2523c80f013a57d612786cafdfddbf15bd1a8b
+      #
+      # SOURCE_REPO:
+      # vw-group-commit-vault
+      #
+      # SOURCE_FOLDER_PATH:
+      # ff2523c80f013a57d612786cafdfddbf15bd1a8b
       # ==========================================================
 
       - name: Parse VWG folder URL
@@ -353,15 +346,25 @@ jobs:
               $segments[1..($segments.Count - 1)] -join '/'
           )
 
-          $sourcePattern = "$sourceRepo/$sourceFolderPath/(*)"
+          $sourceSearchPattern = (
+              "$sourceRepo/$sourceFolderPath/*"
+          )
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'VWG SOURCE FOLDER'
+          Write-Host 'VWG SOURCE'
           Write-Host '========================================'
-          Write-Host "Repository: $sourceRepo"
-          Write-Host "Folder Path: $sourceFolderPath"
-          Write-Host "Pattern: $sourcePattern"
+
+          Write-Host 'Source Repository:'
+          Write-Host $sourceRepo
+
+          Write-Host ''
+          Write-Host 'Source Folder Path:'
+          Write-Host $sourceFolderPath
+
+          Write-Host ''
+          Write-Host 'Source Search Pattern:'
+          Write-Host $sourceSearchPattern
 
           "source_repo=$sourceRepo" |
               Out-File `
@@ -375,33 +378,29 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-          "source_pattern=$sourcePattern" |
+          "source_search_pattern=$sourceSearchPattern" |
               Out-File `
                   -FilePath $env:GITHUB_OUTPUT `
                   -Encoding utf8 `
                   -Append
 
       # ==========================================================
-      # 7. VERIFY VWG SOURCE
+      # 7. VERIFY VWG SOURCE FOLDER
       # ==========================================================
 
       - name: Verify VWG source folder
         shell: pwsh
         env:
-          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
-          SOURCE_FOLDER_PATH: ${{ steps.parse.outputs.source_folder_path }}
+          SOURCE_SEARCH_PATTERN: >-
+            ${{ steps.parse.outputs.source_search_pattern }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $searchPattern = (
-              "$env:SOURCE_REPO/$env:SOURCE_FOLDER_PATH/*"
-          )
-
-          Write-Host "Searching:"
-          Write-Host $searchPattern
+          Write-Host 'Searching VWG:'
+          Write-Host $env:SOURCE_SEARCH_PATTERN
 
           jf rt search `
-              "$searchPattern" `
+              "$env:SOURCE_SEARCH_PATTERN" `
               --server-id="$env:VWG_SERVER_ID" `
               --recursive=true `
               --include-dirs=false `
@@ -415,6 +414,13 @@ jobs:
 
       # ==========================================================
       # 8. PREPARE STAGING DIRECTORY
+      #
+      # The staging directory will preserve:
+      #
+      # STAGING_DIR/
+      # └── vw-group-commit-vault/
+      #     └── commit-folder/
+      #         └── all nested contents
       # ==========================================================
 
       - name: Prepare local staging directory
@@ -435,70 +441,46 @@ jobs:
               -Force |
               Out-Null
 
-          Write-Host "Staging directory:"
+          Write-Host 'Staging directory:'
           Write-Host $env:STAGING_DIR
 
       # ==========================================================
-      # 9. CREATE DOWNLOAD FILE SPEC
+      # 9. DOWNLOAD VWG FOLDER
       #
-      # The source folder itself is not recreated locally.
-      # Only its contents are placed in STAGING_DIR.
-      # Nested hierarchy is preserved.
+      # flat=false preserves:
+      #
+      # vw-group-commit-vault/
+      # └── source-folder/
+      #     └── nested contents
       # ==========================================================
 
-      - name: Create VWG download specification
+      - name: Download VWG folder
         shell: pwsh
         env:
-          SOURCE_PATTERN: ${{ steps.parse.outputs.source_pattern }}
+          SOURCE_SEARCH_PATTERN: >-
+            ${{ steps.parse.outputs.source_search_pattern }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $downloadSpec = Join-Path `
-              -Path $env:RUNNER_TEMP `
-              -ChildPath "vwg-download-${{ github.run_id }}.json"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'DOWNLOAD VWG FOLDER'
+          Write-Host '========================================'
 
-          $localTarget = (
-              $env:STAGING_DIR.TrimEnd('\') + '\{1}'
-          )
+          Write-Host 'Source:'
+          Write-Host $env:SOURCE_SEARCH_PATTERN
 
-          $spec = @{
-              files = @(
-                  @{
-                      pattern = $env:SOURCE_PATTERN
-                      target = $localTarget
-                      recursive = $true
-                      flat = $true
-                  }
-              )
-          }
-
-          $spec |
-              ConvertTo-Json -Depth 20 |
-              Set-Content `
-                  -LiteralPath $downloadSpec `
-                  -Encoding utf8
-
-          "DOWNLOAD_SPEC=$downloadSpec" |
-              Out-File `
-                  -FilePath $env:GITHUB_ENV `
-                  -Encoding utf8 `
-                  -Append
-
-          Write-Host "Download specification:"
-          Get-Content -LiteralPath $downloadSpec
-
-      # ==========================================================
-      # 10. DOWNLOAD VWG FOLDER CONTENTS
-      # ==========================================================
-
-      - name: Download VWG folder contents
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+          Write-Host ''
+          Write-Host 'Local target:'
+          Write-Host "$env:STAGING_DIR/"
 
           jf rt download `
-              --spec="$env:DOWNLOAD_SPEC" `
+              "$env:SOURCE_SEARCH_PATTERN" `
+              "$env:STAGING_DIR/" `
               --server-id="$env:VWG_SERVER_ID" `
+              --recursive=true `
+              --flat=false `
+              --include-dirs=true `
               --fail-no-op=true `
               --threads=1 `
               --split-count=0 `
@@ -520,7 +502,11 @@ jobs:
               throw 'No files were downloaded from VWG.'
           }
 
+          Write-Host ''
           Write-Host "Downloaded files: $($files.Count)"
+
+          Write-Host ''
+          Write-Host 'Downloaded hierarchy:'
 
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
@@ -537,13 +523,65 @@ jobs:
                   -Append
 
       # ==========================================================
+      # 10. CONFIRM REQUIRED SOURCE HIERARCHY
+      #
+      # This ensures that the downloaded repository-level folder,
+      # such as vw-group-commit-vault, is present locally.
+      # ==========================================================
+
+      - name: Confirm VWG hierarchy
+        id: local
+        shell: pwsh
+        env:
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $repositoryFolder = Join-Path `
+              -Path $env:STAGING_DIR `
+              -ChildPath $env:SOURCE_REPO
+
+          if (-not (Test-Path -LiteralPath $repositoryFolder)) {
+              Write-Host ''
+              Write-Host 'Current staging hierarchy:'
+
+              Get-ChildItem `
+                  -LiteralPath $env:STAGING_DIR `
+                  -Recurse |
+                  ForEach-Object {
+                      Write-Host $_.FullName
+                  }
+
+              throw (
+                  'The expected repository folder was not preserved: ' +
+                  $env:SOURCE_REPO
+              )
+          }
+
+          Write-Host ''
+          Write-Host 'Repository folder preserved:'
+          Write-Host $repositoryFolder
+
+          "upload_root=$env:STAGING_DIR" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+      # ==========================================================
       # 11. CALCULATE SCOUT CLONE DESTINATION
       #
       # DAILY:
-      # Daily_Builds/<YYYY-MM-DD>/
       #
-      # OFFICIAL RELEASE:
+      # Daily_Builds/<YYYY-MM-DD>/
+      # └── vw-group-commit-vault/
+      #     └── source folder/
+      #
+      # OFFICIAL:
+      #
       # Official_Release/<CW>/Release/
+      # └── vw-group-commit-vault/
+      #     └── source folder/
       # ==========================================================
 
       - name: Calculate Scout Clone destination
@@ -554,12 +592,17 @@ jobs:
 
           $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
 
+          if (-not $cloneRepo) {
+              throw 'SCOUT_CLONE_REPO is empty.'
+          }
+
           if ($env:BUILD_TYPE -eq 'daily') {
               $dailyDate = $env:CALENDAR_WEEK.Trim()
 
               if ($dailyDate -notmatch '^\d{4}-\d{2}-\d{2}$') {
                   throw (
-                      'Daily date must use YYYY-MM-DD format.'
+                      'Daily date must use YYYY-MM-DD format, ' +
+                      'for example 2026-10-28.'
                   )
               }
 
@@ -582,7 +625,8 @@ jobs:
 
               if ($calendarWeek -notmatch '^CW[0-9]{1,2}$') {
                   throw (
-                      'Official Calendar Week must use CW format.'
+                      'Official Calendar Week must use CW format, ' +
+                      'for example CW29.'
                   )
               }
 
@@ -596,8 +640,7 @@ jobs:
 
               Write-Host ''
               Write-Host '========================================'
-              Write-Host 'OFFICIAL RELEASE DESTINATION'
-              Write-Host '========================================'
+              Write-Host 'OFFICIAL RELEASE          Write-Host '========================================'
               Write-Host "Calendar Week: $calendarWeek"
           }
           else {
@@ -606,7 +649,12 @@ jobs:
 
           $cloneTarget = "$cloneRepo/$destinationPath"
 
-          Write-Host "Destination:"
+          Write-Host ''
+          Write-Host 'Destination Path:'
+          Write-Host $destinationPath
+
+          Write-Host ''
+          Write-Host 'Full Scout Clone Target:'
           Write-Host $cloneTarget
 
           "destination_path=$destinationPath" |
@@ -634,17 +682,36 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 12. PREVIEW UPLOAD
+      # 12. PREVIEW SCOUT CLONE UPLOAD
+      #
+      # Upload root is STAGING_DIR.
+      #
+      # Therefore vw-group-commit-vault is preserved below:
+      #
+      # Official_Release/<CW>/Release/
       # ==========================================================
 
       - name: Preview Scout Clone upload
         shell: pwsh
         env:
+          UPLOAD_ROOT: ${{ steps.local.outputs.upload_root }}
           CLONE_TARGET: ${{ steps.destination.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Push-Location $env:STAGING_DIR
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SCOUT CLONE UPLOAD DRY RUN'
+          Write-Host '========================================'
+
+          Write-Host 'Upload Root:'
+          Write-Host $env:UPLOAD_ROOT
+
+          Write-Host ''
+          Write-Host 'Scout Destination:'
+          Write-Host "$env:CLONE_TARGET/"
+
+          Push-Location $env:UPLOAD_ROOT
 
           try {
               jf rt upload `
@@ -656,7 +723,7 @@ jobs:
                   --dry-run
 
               if ($LASTEXITCODE -ne 0) {
-                  throw 'Scout upload dry run failed.'
+                  throw 'Scout Clone upload dry run failed.'
               }
           }
           finally {
@@ -666,25 +733,35 @@ jobs:
       # ==========================================================
       # 13. UPLOAD TO SCOUT CLONE
       #
-      # Existing matching files use the same target path.
-      # New files are added.
-      # Nested hierarchy is preserved.
+      # Example final path:
+      #
+      # Official_Release/CW29/Release/
+      # └── vw-group-commit-vault/
+      #     └── ff2523c80f.../
+      #         └── nested contents
       # ==========================================================
 
       - name: Upload folder to Scout Clone
         shell: pwsh
         env:
+          UPLOAD_ROOT: ${{ steps.local.outputs.upload_root }}
           CLONE_TARGET: ${{ steps.destination.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Source:"
-          Write-Host $env:STAGING_DIR
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'UPLOAD VWG HIERARCHY TO SCOUT CLONE'
+          Write-Host '========================================'
 
-          Write-Host "Destination:"
+          Write-Host 'Source:'
+          Write-Host $env:UPLOAD_ROOT
+
+          Write-Host ''
+          Write-Host 'Destination:'
           Write-Host "$env:CLONE_TARGET/"
 
-          Push-Location $env:STAGING_DIR
+          Push-Location $env:UPLOAD_ROOT
 
           try {
               jf rt upload `
@@ -706,37 +783,64 @@ jobs:
               Pop-Location
           }
 
+          Write-Host ''
           Write-Host 'Scout Clone upload successful.'
 
       # ==========================================================
-      # 14. VERIFY SCOUT CLONE
+      # 14. VERIFY SCOUT CLONE DESTINATION
       # ==========================================================
 
       - name: Verify Scout Clone destination
         shell: pwsh
         env:
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
           CLONE_TARGET: ${{ steps.destination.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
+          $expectedRepositoryPath = (
+              "$env:CLONE_TARGET/$env:SOURCE_REPO"
+          )
+
+          $verificationPattern = (
+              "$expectedRepositoryPath/*"
+          )
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY SCOUT CLONE DESTINATION'
+          Write-Host '========================================'
+
+          Write-Host 'Expected repository hierarchy:'
+          Write-Host $expectedRepositoryPath
+
+          Write-Host ''
+          Write-Host 'Verification pattern:'
+          Write-Host $verificationPattern
+
           jf rt search `
-              "$env:CLONE_TARGET/*" `
+              "$verificationPattern" `
               --server-id="$env:SCOUT_SERVER_ID" `
               --recursive=true `
               --include-dirs=false `
               --fail-no-op=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Scout Clone verification failed.'
+              throw (
+                  'Scout Clone verification failed. ' +
+                  'The expected VWG repository hierarchy was not found.'
+              )
           }
 
-          Write-Host 'Scout Clone destination verified.'
+          Write-Host ''
+          Write-Host 'Scout Clone hierarchy verified successfully.'
 
       # ==========================================================
-      # 15. REQUEST FVP APPROVAL FOR OFFICIAL RELEASE ONLY
+      # 15. REQUEST POWER AUTOMATE APPROVAL
       #
-      # This workflow never copies to FVP.
-      # Power Automate is the approval gate.
+      # Official Release only.
+      #
+      # This workflow never copies directly to FVP.
       # ==========================================================
 
       - name: Request Official Release FVP approval
@@ -759,6 +863,18 @@ jobs:
           if (-not $env:APPROVAL_URL) {
               throw 'FVP_APPROVAL_WEBHOOK_URL is missing.'
           }
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'REQUEST OFFICIAL RELEASE APPROVAL'
+          Write-Host '========================================'
+
+          Write-Host 'Promotion Path:'
+          Write-Host $env:PROMOTION_PATH
+
+          Write-Host ''
+          Write-Host 'Preserved VWG Repository Folder:'
+          Write-Host $env:SOURCE_REPO
 
           $payload = @{
               request_type = 'fvp_root_folder_approval'
@@ -796,7 +912,13 @@ jobs:
         if: ${{ success() }}
         shell: pwsh
         env:
-          CLONE_TARGET: ${{ steps.destination.outputs.clone_target }}
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
+
+          SOURCE_FOLDER_PATH: >-
+            ${{ steps.parse.outputs.source_folder_path }}
+
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
 
           PROMOTION_PATH: >-
             ${{ steps.destination.outputs.promotion_path }}
@@ -805,16 +927,45 @@ jobs:
           Write-Host '========================================'
           Write-Host 'VWG TO SCOUT CLONE SUCCESSFUL'
           Write-Host '========================================'
-          Write-Host "Build Type: $env:BUILD_TYPE"
-          Write-Host "Scout Destination: $env:CLONE_TARGET"
-          Write-Host "Files Transferred: $env:FILE_COUNT"
+
+          Write-Host 'Build Type:'
+          Write-Host $env:BUILD_TYPE
+
+          Write-Host ''
+          Write-Host 'Source Hierarchy Preserved:'
+          Write-Host "$env:SOURCE_REPO/$env:SOURCE_FOLDER_PATH"
+
+          Write-Host ''
+          Write-Host 'Scout Clone Destination Root:'
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ''
+          Write-Host 'Expected Final Hierarchy:'
+          Write-Host (
+              "$env:CLONE_TARGET/" +
+              "$env:SOURCE_REPO/" +
+              "$env:SOURCE_FOLDER_PATH/"
+          )
+
+          Write-Host ''
+          Write-Host 'Files Transferred:'
+          Write-Host $env:FILE_COUNT
 
           if ($env:BUILD_TYPE -eq 'official') {
-              Write-Host "Promotion Path: $env:PROMOTION_PATH"
-              Write-Host 'Approval: SUBMITTED TO POWER AUTOMATE'
-              Write-Host 'FVP Copy: NOT PERFORMED HERE'
+              Write-Host ''
+              Write-Host 'Promotion Path:'
+              Write-Host $env:PROMOTION_PATH
+
+              Write-Host ''
+              Write-Host 'Approval:'
+              Write-Host 'SUBMITTED TO POWER AUTOMATE'
+
+              Write-Host ''
+              Write-Host 'FVP Copy:'
+              Write-Host 'NOT PERFORMED BY THIS WORKFLOW'
           }
           else {
+              Write-Host ''
               Write-Host 'Daily build complete.'
               Write-Host 'No FVP approval requested.'
           }
@@ -835,15 +986,6 @@ jobs:
               Remove-Item `
                   -LiteralPath $env:STAGING_DIR `
                   -Recurse `
-                  -Force
-          }
-
-          if (
-              $env:DOWNLOAD_SPEC -and
-              (Test-Path -LiteralPath $env:DOWNLOAD_SPEC)
-          ) {
-              Remove-Item `
-                  -LiteralPath $env:DOWNLOAD_SPEC `
                   -Force
           }
 
