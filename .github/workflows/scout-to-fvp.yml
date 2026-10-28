@@ -8,10 +8,25 @@ run-name: >-
 # ================================================================
 # POWER AUTOMATE APPROVAL ONLY
 #
-# There is intentionally no workflow_dispatch trigger.
-# This workflow starts only after Power Automate sends:
+# There is no workflow_dispatch trigger.
 #
-# event_type = fvp-promotion-approved
+# Power Automate must send:
+#
+# event_type:
+# fvp-promotion-approved
+#
+# client_payload:
+# {
+#   "promotion_path": "Official_Release/CW29/Release",
+#   "build_type": "official-release"
+# }
+#
+# or:
+#
+# {
+#   "promotion_path": "Official_Release/CW29/Hotfixes/HF01",
+#   "build_type": "official-hotfix"
+# }
 # ================================================================
 
 on:
@@ -75,7 +90,7 @@ jobs:
           JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
       # ==========================================================
-      # 2. VALIDATE POWER AUTOMATE DISPATCH
+      # 2. VALIDATE POWER AUTOMATE REQUEST
       # ==========================================================
 
       - name: Validate Power Automate promotion request
@@ -125,19 +140,18 @@ jobs:
               )
           ) {
               throw (
-                  'Approved promotion_path must begin with ' +
-                  'Official_Release/.'
+                  'promotion_path must begin with Official_Release/.'
               )
           }
 
           if ($buildType -eq 'official-release') {
               if (
                   $promotionPath -notmatch
-                  '^Official_Release/CW[0-9]+ \(OTA [^)]+\)/Release$'
+                  '^Official_Release/CW[0-9]{1,2}/Release$'
               ) {
                   throw (
-                      'Release path must follow: ' +
-                      'Official_Release/CWxx (OTA version)/Release'
+                      'Release promotion path must follow: ' +
+                      'Official_Release/CWxx/Release'
                   )
               }
           }
@@ -145,11 +159,11 @@ jobs:
           if ($buildType -eq 'official-hotfix') {
               if (
                   $promotionPath -notmatch
-                  '^Official_Release/CW[0-9]+ \(OTA [^)]+\)/Hotfixes$'
+                  '^Official_Release/CW[0-9]{1,2}/Hotfixes/HF[0-9]{2,}$'
               ) {
                   throw (
-                      'Hotfix path must follow: ' +
-                      'Official_Release/CWxx (OTA version)/Hotfixes'
+                      'Hotfix promotion path must follow: ' +
+                      'Official_Release/CWxx/Hotfixes/HFxx'
                   )
               }
           }
@@ -224,7 +238,8 @@ jobs:
 
           $sourcePattern = "$env:SOURCE_PATH/*"
 
-          Write-Host "Searching: $sourcePattern"
+          Write-Host "Searching:"
+          Write-Host $sourcePattern
 
           $searchResult = jf rt search `
               "$sourcePattern" `
@@ -257,9 +272,7 @@ jobs:
           )
 
           if ($realArtifacts.Count -eq 0) {
-              throw (
-                  'The approved folder contains no real artifacts.'
-              )
+              throw 'The approved folder contains no real artifacts.'
           }
 
           Write-Host "Real artifact count: $($realArtifacts.Count)"
@@ -275,9 +288,13 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 5. CREATE COPY FILE SPEC
+      # 5. CREATE FVP COPY SPECIFICATION
       #
-      # promotion.ready is excluded from FVP.
+      # promotion.ready is excluded.
+      #
+      # Existing destination paths receive the approved version.
+      # New paths are added.
+      # Scout Clone remains unchanged.
       # ==========================================================
 
       - name: Create FVP copy specification
@@ -300,6 +317,7 @@ jobs:
                       recursive = $true
                       flat = $true
                       excludePatterns = @(
+                          'promotion.ready',
                           '**/promotion.ready'
                       )
                   }
@@ -312,15 +330,15 @@ jobs:
                   -LiteralPath $specFile `
                   -Encoding utf8
 
-          Write-Host "Pattern: $pattern"
-          Write-Host "Target: $target"
-          Write-Host 'Excluded: **/promotion.ready'
-
           "SPEC_FILE=$specFile" |
               Out-File `
                   -FilePath $env:GITHUB_ENV `
                   -Encoding utf8 `
                   -Append
+
+          Write-Host "Pattern: $pattern"
+          Write-Host "Target: $target"
+          Write-Host 'Excluded: promotion.ready'
 
       # ==========================================================
       # 6. PREVIEW COPY
@@ -341,10 +359,6 @@ jobs:
 
       # ==========================================================
       # 7. COPY APPROVED FOLDER TO FVP
-      #
-      # Existing files at the same destination paths are updated.
-      # New files are copied.
-      # Scout Clone remains unchanged.
       # ==========================================================
 
       - name: Promote approved folder to FVP
@@ -352,8 +366,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Source: $env:SOURCE_PATH/"
-          Write-Host "Destination: $env:TARGET_PATH/"
+          Write-Host "Source:"
+          Write-Host "$env:SOURCE_PATH/"
+
+          Write-Host "Destination:"
+          Write-Host "$env:TARGET_PATH/"
 
           jf rt copy `
               --spec="$env:SPEC_FILE" `
@@ -366,7 +383,7 @@ jobs:
           Write-Host 'Approved folder copy completed.'
 
       # ==========================================================
-      # 8. VERIFY FVP
+      # 8. VERIFY FVP DESTINATION
       # ==========================================================
 
       - name: Verify FVP destination
@@ -374,10 +391,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $targetPattern = "$env:TARGET_PATH/*"
-
           $targetResult = jf rt search `
-              "$targetPattern" `
+              "$env:TARGET_PATH/*" `
               --recursive=true `
               --include-dirs=false `
               --fail-no-op=true
@@ -402,14 +417,14 @@ jobs:
           )
 
           if ($markerInFvp.Count -gt 0) {
-              throw 'promotion.ready was found in FVP.'
+              throw 'promotion.ready was copied to FVP.'
           }
 
           Write-Host 'FVP destination verified.'
           Write-Host 'promotion.ready is not present in FVP.'
 
       # ==========================================================
-      # 9. VERIFY SCOUT SOURCE REMAINS
+      # 9. VERIFY SCOUT CLONE SOURCE REMAINS
       # ==========================================================
 
       - name: Verify Scout Clone source remains
@@ -424,7 +439,7 @@ jobs:
               --fail-no-op=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Scout Clone verification failed after promotion.'
+              throw 'Scout Clone source verification failed.'
           }
 
           Write-Host 'Scout Clone source remains unchanged.'
@@ -453,7 +468,7 @@ jobs:
       # 11. CLEANUP
       # ==========================================================
 
-      - name: Cleanup temporary copy specification
+      - name: Cleanup
         if: ${{ always() }}
         shell: pwsh
         continue-on-error: true
@@ -467,4 +482,4 @@ jobs:
                   -Force
           }
 
-          Write-Host 'Temporary FVP copy specification removed.'
+          Write-Host 'Temporary copy specification removed.'
