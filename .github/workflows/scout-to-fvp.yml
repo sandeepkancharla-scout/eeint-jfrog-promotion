@@ -8,25 +8,35 @@ run-name: >-
 # ================================================================
 # POWER AUTOMATE APPROVAL ONLY
 #
-# There is no workflow_dispatch trigger.
+# This workflow CANNOT be manually started.
 #
-# Power Automate must send:
+# It starts only when Power Automate sends:
 #
+# repository_dispatch
 # event_type:
-# fvp-promotion-approved
+#   fvp-promotion-approved
 #
-# client_payload:
+# Expected Release payload:
+#
 # {
 #   "promotion_path": "Official_Release/CW29/Release",
-#   "build_type": "official-release"
+#   "build_type": "official-release",
+#   "requested_by": "Power Automate"
 # }
 #
-# or:
+# Expected Hotfix payload:
 #
 # {
 #   "promotion_path": "Official_Release/CW29/Hotfixes/HF01",
-#   "build_type": "official-hotfix"
+#   "build_type": "official-hotfix",
+#   "requested_by": "Power Automate"
 # }
+#
+# Legacy:
+# build_type = official
+#
+# is normalized to:
+# official-release
 # ================================================================
 
 on:
@@ -59,12 +69,13 @@ jobs:
 
     env:
       CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+
       FVP_REPO: ${{ secrets.SCOUT_FVP_REPO }}
 
-      PROMOTION_PATH: >-
+      PROMOTION_PATH_INPUT: >-
         ${{ github.event.client_payload.promotion_path }}
 
-      BUILD_TYPE: >-
+      BUILD_TYPE_INPUT: >-
         ${{ github.event.client_payload.build_type }}
 
       REQUESTED_BY: >-
@@ -74,34 +85,54 @@ jobs:
         ${{ github.event.client_payload.approval_id }}
 
       JFROG_CLI_OFFER_CONFIG: "false"
+
       JFROG_CLI_LOG_LEVEL: INFO
 
     steps:
+
       # ==========================================================
       # 1. SET UP JFROG CLI
       # ==========================================================
 
       - name: Set up JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
+
         with:
           disable-auto-build-publish: true
+
         env:
           JF_URL: ${{ secrets.SCOUT_JFROG_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+
+          JF_ACCESS_TOKEN: >-
+            ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
 
       # ==========================================================
-      # 2. VALIDATE POWER AUTOMATE REQUEST
+      # 2. VALIDATE + NORMALIZE POWER AUTOMATE REQUEST
+      #
+      # Accepted build types:
+      #
+      # official-release
+      # official-hotfix
+      #
+      # Legacy:
+      # official -> official-release
       # ==========================================================
 
       - name: Validate Power Automate promotion request
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
           $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
+
           $fvpRepo = $env:FVP_REPO.Trim().Trim('/')
-          $promotionPath = $env:PROMOTION_PATH.Trim().Trim('/')
-          $buildType = $env:BUILD_TYPE.Trim().ToLowerInvariant()
+
+          $promotionPath = $env:PROMOTION_PATH_INPUT.Trim()
+          $promotionPath = $promotionPath.Replace('\', '/')
+          $promotionPath = $promotionPath.Trim('/')
+
+          $buildType = $env:BUILD_TYPE_INPUT.Trim().ToLowerInvariant()
 
           if (-not $cloneRepo) {
               throw 'SCOUT_CLONE_REPO secret is missing.'
@@ -119,13 +150,35 @@ jobs:
               throw 'Power Automate did not provide build_type.'
           }
 
+          # ------------------------------------------------------
+          # Backward compatibility
+          #
+          # Your existing Power Automate may still send:
+          #
+          # official
+          #
+          # Normalize that to:
+          #
+          # official-release
+          # ------------------------------------------------------
+
+          if ($buildType -eq 'official') {
+
+              Write-Host ''
+              Write-Host 'Legacy build_type detected: official'
+              Write-Host 'Normalizing to: official-release'
+
+              $buildType = 'official-release'
+          }
+
           if (
               $buildType -ne 'official-release' -and
               $buildType -ne 'official-hotfix'
           ) {
               throw (
-                  'build_type must be official-release ' +
-                  'or official-hotfix.'
+                  'Unsupported build_type: ' +
+                  $buildType +
+                  '. Expected official-release or official-hotfix.'
               )
           }
 
@@ -140,45 +193,97 @@ jobs:
               )
           ) {
               throw (
-                  'promotion_path must begin with Official_Release/.'
+                  'promotion_path must begin with ' +
+                  'Official_Release/.'
               )
           }
 
+          # ------------------------------------------------------
+          # Validate Release path
+          #
+          # Official_Release/CW29/Release
+          # Official_Release/CW47/Release
+          #
+          # Future CW values work automatically.
+          # ------------------------------------------------------
+
           if ($buildType -eq 'official-release') {
+
               if (
                   $promotionPath -notmatch
                   '^Official_Release/CW[0-9]{1,2}/Release$'
               ) {
                   throw (
-                      'Release promotion path must follow: ' +
-                      'Official_Release/CWxx/Release'
+                      'Official Release promotion_path must follow: ' +
+                      'Official_Release/CWxx/Release. ' +
+                      'Received: ' +
+                      $promotionPath
                   )
               }
           }
 
+          # ------------------------------------------------------
+          # Validate Hotfix path
+          #
+          # Official_Release/CW29/Hotfixes/HF01
+          # Official_Release/CW47/Hotfixes/HF10
+          #
+          # Future CW and HF values work automatically.
+          # ------------------------------------------------------
+
           if ($buildType -eq 'official-hotfix') {
+
               if (
                   $promotionPath -notmatch
                   '^Official_Release/CW[0-9]{1,2}/Hotfixes/HF[0-9]{2,}$'
               ) {
                   throw (
-                      'Hotfix promotion path must follow: ' +
-                      'Official_Release/CWxx/Hotfixes/HFxx'
+                      'Official Hotfix promotion_path must follow: ' +
+                      'Official_Release/CWxx/Hotfixes/HFxx. ' +
+                      'Received: ' +
+                      $promotionPath
                   )
               }
           }
 
           $sourcePath = "$cloneRepo/$promotionPath"
+
           $targetPath = "$fvpRepo/$promotionPath"
 
           Write-Host ''
           Write-Host '========================================'
           Write-Host 'POWER AUTOMATE APPROVAL VALIDATED'
           Write-Host '========================================'
-          Write-Host "Build Type: $buildType"
-          Write-Host "Promotion Path: $promotionPath"
-          Write-Host "Scout Source: $sourcePath"
-          Write-Host "FVP Target: $targetPath"
+
+          Write-Host ''
+          Write-Host 'Build Type:'
+          Write-Host $buildType
+
+          Write-Host ''
+          Write-Host 'Approved Promotion Path:'
+          Write-Host $promotionPath
+
+          Write-Host ''
+          Write-Host 'Scout Clone Source:'
+          Write-Host $sourcePath
+
+          Write-Host ''
+          Write-Host 'FVP Destination:'
+          Write-Host $targetPath
+
+          if ($env:REQUESTED_BY) {
+
+              Write-Host ''
+              Write-Host 'Requested By:'
+              Write-Host $env:REQUESTED_BY
+          }
+
+          if ($env:APPROVAL_ID) {
+
+              Write-Host ''
+              Write-Host 'Approval ID:'
+              Write-Host $env:APPROVAL_ID
+          }
 
           "PROMOTION_PATH=$promotionPath" |
               Out-File `
@@ -210,6 +315,7 @@ jobs:
 
       - name: Verify Scout JFrog connection
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -225,23 +331,49 @@ jobs:
               throw 'Unable to connect to Scout JFrog.'
           }
 
+          Write-Host ''
           Write-Host 'Scout JFrog connection successful.'
 
       # ==========================================================
-      # 4. VERIFY APPROVED SOURCE PATH
+      # 4. VERIFY EXACT APPROVED SOURCE PATH
+      #
+      # Release example:
+      #
+      # Scout Clone/
+      # Official_Release/
+      # CW29/
+      # Release/
+      # vw-group-commit-vault/
+      # ...
+      #
+      # Hotfix example:
+      #
+      # Scout Clone/
+      # Official_Release/
+      # CW29/
+      # Hotfixes/
+      # HF01/
+      # ...
       # ==========================================================
 
       - name: Verify approved Scout Clone folder
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
           $sourcePattern = "$env:SOURCE_PATH/*"
 
-          Write-Host "Searching:"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY APPROVED SCOUT CLONE FOLDER'
+          Write-Host '========================================'
+
+          Write-Host ''
+          Write-Host 'Searching:'
           Write-Host $sourcePattern
 
-          $searchResult = jf rt search `
+          $searchOutput = & jf rt search `
               "$sourcePattern" `
               --recursive=true `
               --include-dirs=false `
@@ -254,31 +386,64 @@ jobs:
               )
           }
 
-          $items = @(
-              $searchResult |
-                  ConvertFrom-Json
-          )
+          $jsonText = $searchOutput -join [Environment]::NewLine
+
+          if (-not $jsonText) {
+              throw 'JFrog search returned no content.'
+          }
+
+          try {
+              $items = @(
+                  $jsonText |
+                      ConvertFrom-Json
+              )
+          }
+          catch {
+
+              Write-Host ''
+              Write-Host 'Raw JFrog search output:'
+              Write-Host $jsonText
+
+              throw 'Unable to parse JFrog search output.'
+          }
 
           $realArtifacts = @(
               $items |
                   Where-Object {
-                      $path = $_.path.Replace('\', '/')
 
-                      -not $path.EndsWith(
-                          '/promotion.ready',
-                          [System.StringComparison]::OrdinalIgnoreCase
+                      if (-not $_.path) {
+                          return $true
+                      }
+
+                      $normalizedPath = $_.path.Replace('\', '/')
+
+                      return (
+                          -not $normalizedPath.EndsWith(
+                              '/promotion.ready',
+                              [System.StringComparison]::OrdinalIgnoreCase
+                          ) -and
+                          $normalizedPath -ne 'promotion.ready'
                       )
                   }
           )
 
           if ($realArtifacts.Count -eq 0) {
-              throw 'The approved folder contains no real artifacts.'
+              throw (
+                  'The approved folder contains no real artifacts.'
+              )
           }
 
-          Write-Host "Real artifact count: $($realArtifacts.Count)"
+          Write-Host ''
+          Write-Host 'Artifacts approved for FVP:'
+          Write-Host $realArtifacts.Count
+
+          Write-Host ''
 
           foreach ($item in $realArtifacts) {
-              Write-Host $item.path
+
+              if ($item.path) {
+                  Write-Host $item.path
+              }
           }
 
           "ARTIFACT_COUNT=$($realArtifacts.Count)" |
@@ -288,17 +453,28 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 5. CREATE FVP COPY SPECIFICATION
+      # 5. CREATE COPY SPECIFICATION
+      #
+      # Copy everything under the approved path.
+      #
+      # Example Release:
+      #
+      # Scout:
+      # Official_Release/CW29/Release/
+      # └── vw-group-commit-vault/
+      #     └── ...
+      #
+      # FVP:
+      # Official_Release/CW29/Release/
+      # └── vw-group-commit-vault/
+      #     └── ...
       #
       # promotion.ready is excluded.
-      #
-      # Existing destination paths receive the approved version.
-      # New paths are added.
-      # Scout Clone remains unchanged.
       # ==========================================================
 
       - name: Create FVP copy specification
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -307,15 +483,20 @@ jobs:
               -ChildPath "fvp-copy-${{ github.run_id }}.json"
 
           $pattern = "$env:SOURCE_PATH/(*)"
+
           $target = "$env:TARGET_PATH/{1}"
 
           $spec = @{
               files = @(
                   @{
                       pattern = $pattern
+
                       target = $target
+
                       recursive = $true
+
                       flat = $true
+
                       excludePatterns = @(
                           'promotion.ready',
                           '**/promotion.ready'
@@ -336,18 +517,51 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-          Write-Host "Pattern: $pattern"
-          Write-Host "Target: $target"
-          Write-Host 'Excluded: promotion.ready'
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'FVP COPY SPECIFICATION'
+          Write-Host '========================================'
+
+          Write-Host ''
+          Write-Host 'Source Pattern:'
+          Write-Host $pattern
+
+          Write-Host ''
+          Write-Host 'Target:'
+          Write-Host $target
+
+          Write-Host ''
+          Write-Host 'Excluded:'
+          Write-Host 'promotion.ready'
+
+          Write-Host ''
+          Write-Host 'Generated specification:'
+
+          Get-Content `
+              -LiteralPath $specFile
 
       # ==========================================================
-      # 6. PREVIEW COPY
+      # 6. PREVIEW FVP COPY
       # ==========================================================
 
       - name: Preview approved folder copy to FVP
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'FVP COPY DRY RUN'
+          Write-Host '========================================'
+
+          Write-Host ''
+          Write-Host 'Source:'
+          Write-Host "$env:SOURCE_PATH/"
+
+          Write-Host ''
+          Write-Host 'Destination:'
+          Write-Host "$env:TARGET_PATH/"
 
           jf rt copy `
               --spec="$env:SPEC_FILE" `
@@ -358,18 +572,40 @@ jobs:
           }
 
       # ==========================================================
-      # 7. COPY APPROVED FOLDER TO FVP
+      # 7. PROMOTE APPROVED FOLDER
+      #
+      # Behavior:
+      #
+      # File does not exist in FVP:
+      #   copied
+      #
+      # File exists at same path:
+      #   approved Scout version is copied to that path
+      #
+      # Other unrelated FVP files:
+      #   unchanged
+      #
+      # Scout Clone:
+      #   unchanged
       # ==========================================================
 
       - name: Promote approved folder to FVP
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Source:"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'PROMOTE APPROVED FOLDER TO FVP'
+          Write-Host '========================================'
+
+          Write-Host ''
+          Write-Host 'Source:'
           Write-Host "$env:SOURCE_PATH/"
 
-          Write-Host "Destination:"
+          Write-Host ''
+          Write-Host 'Destination:'
           Write-Host "$env:TARGET_PATH/"
 
           jf rt copy `
@@ -380,7 +616,8 @@ jobs:
               throw 'Approved folder promotion to FVP failed.'
           }
 
-          Write-Host 'Approved folder copy completed.'
+          Write-Host ''
+          Write-Host 'Approved folder copied successfully.'
 
       # ==========================================================
       # 8. VERIFY FVP DESTINATION
@@ -388,11 +625,23 @@ jobs:
 
       - name: Verify FVP destination
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $targetResult = jf rt search `
-              "$env:TARGET_PATH/*" `
+          $targetPattern = "$env:TARGET_PATH/*"
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY FVP DESTINATION'
+          Write-================================'
+
+          Write-Host ''
+          Write-Host 'Searching:'
+          Write-Host $targetPattern
+
+          $searchOutput = & jf rt search `
+              "$targetPattern" `
               --recursive=true `
               --include-dirs=false `
               --fail-no-op=true
@@ -401,36 +650,65 @@ jobs:
               throw 'FVP destination verification failed.'
           }
 
-          $targetItems = @(
-              $targetResult |
-                  ConvertFrom-Json
-          )
+          $jsonText = $searchOutput -join :NewLine
+
+          try {
+              $targetItems = @(
+                  $jsonText |
+                      ConvertFrom-Json
+              )
+          }
+          catch {
+              throw 'Unable to parse FVP search response.'
+          }
 
           $markerInFvp = @(
               $targetItems |
                   Where-Object {
-                      $_.path.Replace('\', '/').EndsWith(
-                          '/promotion.ready',
-                          [System.StringComparison]::OrdinalIgnoreCase
+
+                      if (-not $_.path) {
+                          return $false
+                      }
+
+                      $normalizedPath = $_.path.Replace('\', '/')
+
+                      return (
+                          $normalizedPath.EndsWith(
+                              '/promotion.ready',
+                              [System.StringComparison]::OrdinalIgnoreCase
+                          ) -or
+                          $normalizedPath -eq 'promotion.ready'
                       )
                   }
           )
 
           if ($markerInFvp.Count -gt 0) {
-              throw 'promotion.ready was copied to FVP.'
+              throw (
+                  'promotion.ready was found in FVP. ' +
+                  'The control file must never be promoted.'
+              )
           }
 
-          Write-Host 'FVP destination verified.'
+          Write-Host ''
+          Write-Host 'FVP destination verified successfully.'
+
+          Write-Host ''
           Write-Host 'promotion.ready is not present in FVP.'
 
       # ==========================================================
-      # 9. VERIFY SCOUT CLONE SOURCE REMAINS
+      # 9. VERIFY SCOUT CLONE SOURCE STILL EXISTS
       # ==========================================================
 
       - name: Verify Scout Clone source remains
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Stop'
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY SCOUT CLONE SOURCE'
+          Write-Host '========================================'
 
           jf rt search `
               "$env:SOURCE_PATH/*" `
@@ -439,9 +717,13 @@ jobs:
               --fail-no-op=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Scout Clone source verification failed.'
+              throw (
+                  'Scout Clone source verification failed ' +
+                  'after FVP promotion.'
+              )
           }
 
+          Write-Host ''
           Write-Host 'Scout Clone source remains unchanged.'
 
       # ==========================================================
@@ -451,18 +733,44 @@ jobs:
       - name: Promotion summary
         if: ${{ success() }}
         shell: pwsh
+
         run: |
           Write-Host ''
           Write-Host '========================================'
           Write-Host 'FVP PROMOTION SUCCESSFUL'
           Write-Host '========================================'
-          Write-Host "Build Type: $env:BUILD_TYPE"
-          Write-Host "Promotion Path: $env:PROMOTION_PATH"
-          Write-Host "Scout Source: $env:SOURCE_PATH/"
-          Write-Host "FVP Destination: $env:TARGET_PATH/"
-          Write-Host "Artifacts Promoted: $env:ARTIFACT_COUNT"
-          Write-Host 'Scout Clone Source: RETAINED'
-          Write-Host 'promotion.ready: NOT COPIED TO FVP'
+
+          Write-Host ''
+          Write-Host 'Build Type:'
+          Write-Host $env:BUILD_TYPE
+
+          Write-Host ''
+          Write-Host 'Approved Promotion Path:'
+          Write-Host $env:PROMOTION_PATH
+
+          Write-Host ''
+          Write-Host 'Scout Clone Source:'
+          Write-Host "$env:SOURCE_PATH/"
+
+          Write-Host ''
+          Write-Host 'FVP Destination:'
+          Write-Host "$env:TARGET_PATH/"
+
+          Write-Host ''
+          Write-Host 'Artifacts Promoted:'
+          Write-Host $env:ARTIFACT_COUNT
+
+          Write-Host ''
+          Write-Host 'Scout Clone Source:'
+          Write-Host 'RETAINED'
+
+          Write-Host ''
+          Write-Host 'promotion.ready:'
+          Write-Host 'NOT COPIED TO FVP'
+
+          Write-Host ''
+          Write-Host 'Trigger:'
+          Write-Host 'POWER AUTOMATE APPROVAL / REPOSITORY_DISPATCH'
 
       # ==========================================================
       # 11. CLEANUP
@@ -472,6 +780,7 @@ jobs:
         if: ${{ always() }}
         shell: pwsh
         continue-on-error: true
+
         run: |
           if (
               $env:SPEC_FILE -and
@@ -482,4 +791,5 @@ jobs:
                   -Force
           }
 
-          Write-Host 'Temporary copy specification removed.'
+          Write-Host ''
+          Write-Host 'Temporary FVP copy specification removed.'
