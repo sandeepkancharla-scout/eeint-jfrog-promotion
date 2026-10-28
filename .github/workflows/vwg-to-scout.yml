@@ -36,8 +36,9 @@ concurrency:
       inputs.build_type
     }}-${{
       inputs.calendar_week
+    }}-${{
+      github.run_id
     }}
-
   cancel-in-progress: false
 
 jobs:
@@ -73,7 +74,6 @@ jobs:
       JFROG_CLI_LOG_LEVEL: INFO
 
     steps:
-
       # ==========================================================
       # 1. SET UP JFROG CLI
       # ==========================================================
@@ -84,7 +84,22 @@ jobs:
           disable-auto-build-publish: true
 
       # ==========================================================
-      # 2. SET TEMPORARY DIRECTORY
+      # 2. VERIFY JFROG CLI
+      # ==========================================================
+
+      - name: Verify JFrog CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          jf --version
+
+          if ($LASTEXITCODE -ne 0) {
+              throw 'JFrog CLI is unavailable.'
+          }
+
+      # ==========================================================
+      # 3. SET TEMPORARY DIRECTORY
       # ==========================================================
 
       - name: Set temporary directory
@@ -102,20 +117,18 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-          Write-Host ""
-          Write-Host "Temporary directory:"
+          Write-Host ''
+          Write-Host 'Temporary directory:'
           Write-Host $stagingDirectory
 
       # ==========================================================
-      # 3. VALIDATE INPUTS AND SECRETS
+      # 4. VALIDATE INPUTS AND SECRETS
       #
       # DAILY:
-      # calendar_week input contains a date:
-      # YYYY-MM-DD
+      # calendar_week contains YYYY-MM-DD
       #
       # OFFICIAL:
-      # calendar_week input contains:
-      # CW29, CW35, CW41, etc.
+      # calendar_week contains CWxx
       # ==========================================================
 
       - name: Validate inputs and secrets
@@ -164,32 +177,36 @@ jobs:
                   )
               }
 
-              $parsedDate = [datetime]::MinValue
+              $dateParts = $dailyDate.Split('-')
 
-              $validDate = [datetime]::TryParseExact(
-                  $dailyDate,
-                  'yyyy-MM-dd',
-                  [System.Globalization.CultureInfo]::InvariantCulture,
-                  [System.Globalization.DateTimeStyles]::None,
-                  [ref]$parsedDate
-              )
-
-              if (-not $validDate) {
+              try {
+                  $validatedDate = Get-Date `
+                      -Year ([int]$dateParts[0]) `
+                      -Month ([int]$dateParts[1]) `
+                      -Day ([int]$dateParts[2]) `
+                      -Hour 0 `
+                      -Minute 0 `
+                      -Second 0 `
+                      -Millisecond 0
+              }
+              catch {
                   throw 'The Daily build date is invalid.'
               }
 
-              Write-Host ""
-              Write-Host "========================================"
-              Write-Host "DAILY BUILD INPUT"
-              Write-Host "========================================"
-              Write-Host "Date:"
+              if ($validatedDate.ToString('yyyy-MM-dd') -ne $dailyDate) {
+                  throw 'The Daily build date is invalid.'
+              }
+
+              Write-Host ''
+              Write-Host '========================================'
+              Write-Host 'DAILY BUILD INPUT'
+              Write-Host '========================================'
+              Write-Host 'Date:'
               Write-Host $dailyDate
           }
 
           if ($env:BUILD_TYPE -eq 'official') {
-              $calendarWeek = (
-                  $env:CALENDAR_WEEK.Trim().ToUpperInvariant()
-              )
+              $calendarWeek = $env:CALENDAR_WEEK.Trim().ToUpperInvariant()
 
               if ($calendarWeek -notmatch '^CW[0-9]{1,2}$') {
                   throw (
@@ -205,36 +222,45 @@ jobs:
                   )
               }
 
-              Write-Host ""
-              Write-Host "========================================"
-              Write-Host "OFFICIAL RELEASE INPUT"
-              Write-Host "========================================"
-              Write-Host "Calendar Week:"
+              Write-Host ''
+              Write-Host '========================================'
+              Write-Host 'OFFICIAL RELEASE INPUT'
+              Write-Host '========================================'
+              Write-Host 'Calendar Week:'
               Write-Host $calendarWeek
           }
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "INPUT VALIDATION SUCCESSFUL"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'INPUT VALIDATION SUCCESSFUL'
+          Write-Host '========================================'
 
-          Write-Host "Folder URL:"
+          Write-Host 'Folder URL:'
           Write-Host $env:FOLDER_URL
 
-          Write-Host ""
-          Write-Host "Build Type:"
+          Write-Host ''
+          Write-Host 'Build Type:'
           Write-Host $env:BUILD_TYPE
 
       # ==========================================================
-      # 4. CONFIGURE VWG JFROG
+      # 5. CLEAN EXISTING JFROG CONFIGURATIONS
+      # ==========================================================
+
+      - name: Clean existing JFrog configurations
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          jf c remove "$env:VWG_SERVER_ID" --quiet 2>$null
+          jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
+
+      # ==========================================================
+      # 6. CONFIGURE VWG JFROG
       # ==========================================================
 
       - name: Configure VWG JFrog
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          jf c remove "$env:VWG_SERVER_ID" --quiet 2>$null
 
           jf c add `
               "$env:VWG_SERVER_ID" `
@@ -254,18 +280,16 @@ jobs:
               throw 'Cannot connect to VWG JFrog.'
           }
 
-          Write-Host "VWG JFrog connection successful."
+          Write-Host 'VWG JFrog connection successful.'
 
       # ==========================================================
-      # 5. CONFIGURE SCOUT JFROG
+      # 7. CONFIGURE SCOUT JFROG
       # ==========================================================
 
       - name: Configure Scout JFrog
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
           jf c add `
               "$env:SCOUT_SERVER_ID" `
@@ -285,15 +309,10 @@ jobs:
               throw 'Cannot connect to Scout JFrog.'
           }
 
-          Write-Host "Scout JFrog connection successful."
+          Write-Host 'Scout JFrog connection successful.'
 
       # ==========================================================
-      # 6. PARSE VWG FOLDER URL
-      #
-      # The first path segment after /artifactory/ is the
-      # source repository.
-      #
-      # The remaining segments form the source folder path.
+      # 8. PARSE VWG FOLDER URL
       # ==========================================================
 
       - name: Parse VWG folder URL
@@ -319,10 +338,10 @@ jobs:
           }
 
           if ($sourceUri.Host -ne $configuredUri.Host) {
-              Write-Host "Input host:"
+              Write-Host 'Input host:'
               Write-Host $sourceUri.Host
 
-              Write-Host "Configured host:"
+              Write-Host 'Configured host:'
               Write-Host $configuredUri.Host
 
               throw (
@@ -375,20 +394,20 @@ jobs:
               "$sourceRepo/$sourceFolderPath/*"
           )
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "VWG SOURCE"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VWG SOURCE'
+          Write-Host '========================================'
 
-          Write-Host "Source Repository:"
+          Write-Host 'Source Repository:'
           Write-Host $sourceRepo
 
-          Write-Host ""
-          Write-Host "Source Folder Path:"
+          Write-Host ''
+          Write-Host 'Source Folder Path:'
           Write-Host $sourceFolderPath
 
-          Write-Host ""
-          Write-Host "Source Search Pattern:"
+          Write-Host ''
+          Write-Host 'Source Search Pattern:'
           Write-Host $sourceSearchPattern
 
           "source_repo=$sourceRepo" |
@@ -410,7 +429,7 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 7. VERIFY VWG SOURCE FOLDER
+      # 9. VERIFY VWG SOURCE FOLDER
       # ==========================================================
 
       - name: Verify VWG source folder
@@ -421,7 +440,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Searching VWG:"
+          Write-Host 'Searching VWG:'
           Write-Host $env:SOURCE_SEARCH_PATTERN
 
           jf rt search `
@@ -435,10 +454,10 @@ jobs:
               throw 'No artifacts were found in the VWG folder.'
           }
 
-          Write-Host "VWG source folder verified."
+          Write-Host 'VWG source folder verified.'
 
       # ==========================================================
-      # 8. PREPARE STAGING DIRECTORY
+      # 10. PREPARE STAGING DIRECTORY
       # ==========================================================
 
       - name: Prepare local staging directory
@@ -459,22 +478,21 @@ jobs:
               -Force |
               Out-Null
 
-          Write-Host "Staging directory:"
+          Write-Host 'Staging directory:'
           Write-Host $env:STAGING_DIR
 
       # ==========================================================
-      # 9. DOWNLOAD VWG FOLDER
+      # 11. DOWNLOAD VWG FOLDER
       #
-      # flat=false preserves the hierarchy returned by JFrog.
+      # flat=false preserves the hierarchy returned by VWG JFrog.
       #
-      # Based on the actual downloaded result, the staging tree is:
+      # The observed structure is:
       #
       # STAGING_DIR/
       # └── vw-group-commit-vault/
       #     └── commit/
       #         └── build/
-      #             └── product/
-      #                 └── nested files
+      #             └── nested files
       # ==========================================================
 
       - name: Download VWG folder
@@ -485,16 +503,16 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "DOWNLOAD VWG FOLDER"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'DOWNLOAD VWG FOLDER'
+          Write-Host '========================================'
 
-          Write-Host "Source:"
+          Write-Host 'Source:'
           Write-Host $env:SOURCE_SEARCH_PATTERN
 
-          Write-Host ""
-          Write-Host "Local target:"
+          Write-Host ''
+          Write-Host 'Local target:'
           Write-Host "$env:STAGING_DIR/"
 
           jf rt download `
@@ -525,12 +543,12 @@ jobs:
               throw 'No files were downloaded from VWG.'
           }
 
-          Write-Host ""
-          Write-Host "Downloaded files:"
+          Write-Host ''
+          Write-Host 'Downloaded files:'
           Write-Host $files.Count
 
-          Write-Host ""
-          Write-Host "Downloaded hierarchy:"
+          Write-Host ''
+          Write-Host 'Downloaded hierarchy:'
 
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
@@ -547,12 +565,12 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 10. CONFIRM ACTUAL DOWNLOADED HIERARCHY
+      # 12. CONFIRM ACTUAL DOWNLOADED HIERARCHY
       #
-      # Do not require the top-level folder to match SOURCE_REPO.
+      # The complete staging hierarchy is authoritative.
       #
-      # The actual downloaded hierarchy is authoritative.
-      # The complete STAGING_DIR hierarchy will be uploaded.
+      # Do not compare the top-level downloaded directory with the
+      # parsed Artifactory repository key.
       # ==========================================================
 
       - name: Confirm downloaded VWG hierarchy
@@ -585,24 +603,24 @@ jobs:
               throw 'Downloaded staging hierarchy is empty.'
           }
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "DOWNLOADED VWG HIERARCHY"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'DOWNLOADED VWG HIERARCHY'
+          Write-Host '========================================'
 
-          Write-Host ""
-          Write-Host "Top-level items:"
+          Write-Host ''
+          Write-Host 'Top-level items:'
 
           foreach ($item in $topLevelItems) {
               Write-Host $item.Name
           }
 
-          Write-Host ""
-          Write-Host "File count:"
+          Write-Host ''
+          Write-Host 'File count:'
           Write-Host $files.Count
 
-          Write-Host ""
-          Write-Host "Hierarchy that will be copied to Scout:"
+          Write-Host ''
+          Write-Host 'Hierarchy that will be copied to Scout:'
 
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
@@ -619,7 +637,7 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 11. CALCULATE SCOUT CLONE DESTINATION
+      # 13. CALCULATE SCOUT CLONE DESTINATION
       #
       # DAILY:
       #
@@ -657,17 +675,14 @@ jobs:
               }
 
               $destinationPath = "Daily_Builds/$dailyDate"
+              $promotionPath = ''
+              $approvalBuildType = 'daily'
 
-              $promotionPath = ""
-
-              $approvalBuildType = "daily"
-
-              Write-Host ""
-              Write-Host "========================================"
-              Write-Host "DAILY BUILD DESTINATION"
-              Write-Host "========================================"
-
-              Write-Host "Date:"
+              Write-Host ''
+              Write-Host '========================================'
+              Write-Host 'DAILY BUILD DESTINATION'
+              Write-Host '========================================'
+              Write-Host 'Date:'
               Write-Host $dailyDate
           }
           elseif ($env:BUILD_TYPE -eq 'official') {
@@ -682,20 +697,18 @@ jobs:
                   )
               }
 
-      th = (
+              $destinationPath = (
                   "Official_Release/$calendarWeek/Release"
               )
 
               $promotionPath = $destinationPath
+              $approvalBuildType = 'official-release'
 
-              $approvalBuildType = "official-release"
-
-              Write-Host ""
-              Write-Host "========================================"
-              Write-Host "OFFICIAL RELEASE DESTINATION"
-              Write-Host "========================================"
-
-              Write-Host "Calendar Week:"
+              Write-Host ''
+              Write-Host '========================================'
+              Write-Host 'OFFICIAL RELEASE DESTINATION'
+              Write-Host '========================================'
+              Write-Host 'Calendar Week:'
               Write-Host $calendarWeek
           }
           else {
@@ -704,12 +717,12 @@ jobs:
 
           $cloneTarget = "$cloneRepo/$destinationPath"
 
-          Write-Host ""
-          Write-Host "Destination Path:"
+          Write-Host ''
+          Write-Host 'Destination Path:'
           Write-Host $destinationPath
 
-          Write-Host ""
-          Write-Host "Full Scout Clone Target:"
+          Write-Host ''
+          Write-Host 'Full Scout Clone Target:'
           Write-Host $cloneTarget
 
           "destination_path=$destinationPath" |
@@ -737,11 +750,11 @@ jobs:
                   -Append
 
       # ==========================================================
-      # 12. PREVIEW SCOUT CLONE UPLOAD
+      # 14. PREVIEW SCOUT CLONE UPLOAD
       #
       # Upload root is the complete STAGING_DIR.
       #
-      # This preserves vw-group-commit-vault underneath Release.
+      # This preserves vw-group-commit-vault under Release.
       # ==========================================================
 
       - name: Preview Scout Clone upload
@@ -752,23 +765,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "SCOUT CLONE UPLOAD DRY RUN"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SCOUT CLONE UPLOAD DRY RUN'
+          Write-Host '========================================'
 
-          Write-Host "Upload Root:"
+          Write-Host 'Upload Root:'
           Write-Host $env:UPLOAD_ROOT
 
-          Write-Host ""
-          Write-Host "Scout Destination:"
+          Write-Host ''
+          Write-Host 'Scout Destination:'
           Write-Host "$env:CLONE_TARGET/"
 
           Push-Location $env:UPLOAD_ROOT
 
           try {
               jf rt upload `
-                  "./*" `
+                  './*' `
                   "$env:CLONE_TARGET/" `
                   --server-id="$env:SCOUT_SERVER_ID" `
                   --recursive=true `
@@ -784,7 +797,7 @@ jobs:
           }
 
       # ==========================================================
-      # 13. UPLOAD COMPLETE HIERARCHY TO SCOUT CLONE
+      # 15. UPLOAD COMPLETE HIERARCHY TO SCOUT CLONE
       #
       # Example:
       #
@@ -802,23 +815,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "UPLOAD VWG HIERARCHY TO SCOUT CLONE"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'UPLOAD VWG HIERARCHY TO SCOUT CLONE'
+          Write-Host '========================================'
 
-          Write-Host "Source:"
+          Write-Host 'Source:'
           Write-Host $env:UPLOAD_ROOT
 
-          Write-Host ""
-          Write-Host "Destination:"
+          Write-Host ''
+          Write-Host 'Destination:'
           Write-Host "$env:CLONE_TARGET/"
 
           Push-Location $env:UPLOAD_ROOT
 
           try {
               jf rt upload `
-                  "./*" `
+                  './*' `
                   "$env:CLONE_TARGET/" `
                   --server-id="$env:SCOUT_SERVER_ID" `
                   --recursive=true `
@@ -836,16 +849,11 @@ jobs:
               Pop-Location
           }
 
-          Write-Host ""
-          Write-Host "Scout Clone upload successful."
+          Write-Host ''
+          Write-Host 'Scout Clone upload successful.'
 
       # ==========================================================
-      # 14. VERIFY SCOUT CLONE DESTINATION
-      #
-      # Verify everything under the calculated destination root.
-      #
-      # Do not assume SOURCE_REPO equals the top-level downloaded
-      # folder because the observed hierarchy may differ.
+      # 16. VERIFY SCOUT CLONE DESTINATION
       # ==========================================================
 
       - name: Verify Scout Clone destination
@@ -857,16 +865,16 @@ jobs:
 
           $verificationPattern = "$env:CLONE_TARGET/*"
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "VERIFY SCOUT CLONE DESTINATION"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY SCOUT CLONE DESTINATION'
+          Write-Host '========================================'
 
-          Write-Host "Verification Root:"
+          Write-Host 'Verification Root:'
           Write-Host $env:CLONE_TARGET
 
-          Write-Host ""
-          Write-Host "Search Pattern:"
+          Write-Host ''
+          Write-Host 'Search Pattern:'
           Write-Host $verificationPattern
 
           jf rt search `
@@ -880,15 +888,15 @@ jobs:
               throw 'Scout Clone destination verification failed.'
           }
 
-          Write-Host ""
-          Write-Host "Scout Clone destination verified successfully."
+          Write-Host ''
+          Write-Host 'Scout Clone destination verified successfully.'
 
       # ==========================================================
-      # 15. REQUEST OFFICIAL RELEASE APPROVAL
+      # 17. REQUEST OFFICIAL RELEASE APPROVAL
       #
-      # Only Official builds reach Power Automate.
+      # Official builds only.
       #
-      # Daily builds are copied to Scout Clone and stop.
+      # Daily builds stop after Scout Clone verification.
       #
       # This workflow never copies directly to FVP.
       # ==========================================================
@@ -914,23 +922,23 @@ jobs:
               throw 'FVP_APPROVAL_WEBHOOK_URL is missing.'
           }
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "REQUEST OFFICIAL RELEASE APPROVAL"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'REQUEST OFFICIAL RELEASE APPROVAL'
+          Write-Host '========================================'
 
-          Write-Host "Promotion Path:"
+          Write-Host 'Promotion Path:'
           Write-Host $env:PROMOTION_PATH
 
-          Write-Host ""
-          Write-Host "Original VWG Source:"
+          Write-Host ''
+          Write-Host 'Original VWG Source:'
           Write-Host (
               "$env:SOURCE_REPO/" +
               "$env:SOURCE_FOLDER_PATH"
           )
 
           $payload = @{
-              request_type = "fvp_root_folder_approval"
+              request_type = 'fvp_root_folder_approval'
               repo_key = $env:CLONE_REPO
               source_repo = $env:SOURCE_REPO
               source_path = $env:SOURCE_FOLDER_PATH
@@ -939,8 +947,8 @@ jobs:
               path = $env:PROMOTION_PATH
               build_type = $env:APPROVAL_BUILD_TYPE
               file_count = $env:FILE_COUNT
-              requested_by = "${{ github.actor }}"
-              github_run_id = "${{ github.run_id }}"
+              requested_by = '${{ github.actor }}'
+              github_run_id = '${{ github.run_id }}'
           }
 
           $json = $payload |
@@ -949,16 +957,16 @@ jobs:
           Invoke-RestMethod `
               -Uri $env:APPROVAL_URL `
               -Method Post `
-              -ContentType "application/json" `
+              -ContentType 'application/json' `
               -Body $json `
               -ErrorAction Stop
 
-          Write-Host ""
-          Write-Host "Official Release approval request submitted."
-          Write-Host "This workflow will not copy anything to FVP."
+          Write-Host ''
+          Write-Host 'Official Release approval request submitted.'
+          Write-Host 'This workflow will not copy anything to FVP.'
 
       # ==========================================================
-      # 16. SUMMARY
+      # 18. SUMMARY
       # ==========================================================
 
       - name: Transfer summary
@@ -976,57 +984,60 @@ jobs:
           PROMOTION_PATH: >-
             ${{ steps.destination.outputs.promotion_path }}
         run: |
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "VWG TO SCOUT CLONE SUCCESSFUL"
-          Write-Host "========================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VWG TO SCOUT CLONE SUCCESSFUL'
+          Write-Host '========================================'
 
-          Write-Host "Build Type:"
+          Write-Host 'Build Type:'
           Write-Host $env:BUILD_TYPE
 
-          Write-Host ""
-          Write-Host "VWG Source:"
+          Write-Host ''
+          Write-Host 'Original VWG Source:'
           Write-Host (
               "$env:SOURCE_REPO/" +
               "$env:SOURCE_FOLDER_PATH"
           )
 
-          Write-Host ""
-          Write-Host "Scout Clone Destination Root:"
+          Write-Host ''
+          Write-Host 'Scout Clone Destination Root:'
           Write-Host $env:CLONE_TARGET
 
-          Write-Host ""
-          Write-Host "Files Transferred:"
+          Write-Host ''
+          Write-Host 'Files Transferred:'
           Write-Host $env:FILE_COUNT
 
-          if ($env:BUILD_TYPE -eq "official") {
-              Write-Host ""
-              Write-Host "Expected hierarchy:"
+          Write-Host ''
+          Write-Host 'Actual downloaded hierarchy was preserved.'
+
+          if ($env:BUILD_TYPE -eq 'official') {
+              Write-Host ''
+              Write-Host 'Expected Official hierarchy:'
               Write-Host (
                   "$env:CLONE_TARGET/" +
                   "vw-group-commit-vault/..."
               )
 
-              Write-Host ""
-              Write-Host "Promotion Path:"
+              Write-Host ''
+              Write-Host 'Promotion Path:'
               Write-Host $env:PROMOTION_PATH
 
-              Write-Host ""
-              Write-Host "Approval:"
-              Write-Host "SUBMITTED TO POWER AUTOMATE"
+              Write-Host ''
+              Write-Host 'Approval:'
+              Write-Host 'SUBMITTED TO POWER AUTOMATE'
 
-              Write-Host ""
-              Write-Host "FVP Copy:"
-              Write-Host "NOT PERFORMED BY THIS WORKFLOW"
+              Write-Host ''
+              Write-Host 'FVP Copy:'
+              Write-Host 'NOT PERFORMED BY THIS WORKFLOW'
           }
           else {
-              Write-Host ""
-              Write-Host "Daily build complete."
-              Write-Host "No FVP approval requested."
+              Write-Host ''
+              Write-Host 'Daily build complete.'
+              Write-Host 'No FVP approval requested.'
           }
 
       # ==========================================================
-      # 17. CLEANUP
+      # 19. CLEANUP
       # ==========================================================
 
       - name: Cleanup
@@ -1047,6 +1058,6 @@ jobs:
           jf c remove "$env:VWG_SERVER_ID" --quiet 2>$null
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
-          Write-Host ""
-          Write-Host "Temporary files removed."
-          Write-Host "Temporary JFrog configurations removed."
+          Write-Host ''
+          Write-Host 'Temporary files removed.'
+          Write-Host 'Temporary JFrog configurations removed.'
