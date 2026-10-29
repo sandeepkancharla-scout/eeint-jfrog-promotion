@@ -1,52 +1,52 @@
-name: Test VWG JFrog Connectivity
+name: Test Scout JFrog Connectivity
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-vwg:
-    name: Test VWG from GitHub Ubuntu
+  test-scout:
+    name: Test Scout from GitHub Ubuntu
     runs-on: ubuntu-latest
 
     steps:
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
 
-      - name: Test VWG JFrog
+      - name: Test Scout JFrog
         shell: bash
         env:
-          VWG_URL: ${{ secrets.VWG_JFROG_URL }}
-          VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
+          SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
 
           echo "======================================"
-          echo "Testing VWG JFrog from ubuntu-latest"
+          echo "Testing Scout JFrog from ubuntu-latest"
           echo "======================================"
 
-          if [ -z "$VWG_URL" ]; then
-            echo "ERROR: VWG_JFROG_URL is empty"
+          if [ -z "$SCOUT_URL" ]; then
+            echo "ERROR: SCOUT_JFROG_URL is empty"
             exit 1
           fi
 
-          if [ -z "$VWG_TOKEN" ]; then
-            echo "ERROR: VWG_JFROG_ACCESS_TOKEN is empty"
+          if [ -z "$SCOUT_TOKEN" ]; then
+            echo "ERROR: SCOUT_JFROG_ACCESS_TOKEN is empty"
             exit 1
           fi
 
-          echo "Configuring VWG JFrog..."
+          echo "Configuring Scout JFrog..."
 
-          jf c add vwg \
-            --url="$VWG_URL" \
-            --access-token="$VWG_TOKEN" \
+          jf c add scout \
+            --url="$SCOUT_URL" \
+            --access-token="$SCOUT_TOKEN" \
             --interactive=false
 
           echo
-          echo "Testing connection..."
+          echo "Testing Scout connection..."
 
-          jf rt ping --server-id=vwg
+          jf rt ping --server-id=scout
 
           echo
           echo "======================================"
-          echo "VWG JFrog is reachable from Ubuntu"
+          echo "Scout JFrog is reachable from ubuntu-latest"
           echo "======================================"
