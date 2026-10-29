@@ -1,0 +1,52 @@
+name: Test VWG JFrog Connectivity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-vwg:
+    name: Test VWG from GitHub Ubuntu
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+
+      - name: Test VWG JFrog
+        shell: bash
+        env:
+          VWG_URL: ${{ secrets.VWG_JFROG_URL }}
+          VWG_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "Testing VWG JFrog from ubuntu-latest"
+          echo "======================================"
+
+          if [ -z "$VWG_URL" ]; then
+            echo "ERROR: VWG_JFROG_URL is empty"
+            exit 1
+          fi
+
+          if [ -z "$VWG_TOKEN" ]; then
+            echo "ERROR: VWG_JFROG_ACCESS_TOKEN is empty"
+            exit 1
+          fi
+
+          echo "Configuring VWG JFrog..."
+
+          jf c add vwg \
+            --url="$VWG_URL" \
+            --access-token="$VWG_TOKEN" \
+            --interactive=false
+
+          echo
+          echo "Testing connection..."
+
+          jf rt ping --server-id=vwg
+
+          echo
+          echo "======================================"
+          echo "VWG JFrog is reachable from Ubuntu"
+          echo "======================================"
