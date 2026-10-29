@@ -1,21 +1,6 @@
 name: Scout Clone to FVP
 
 on:
-  workflow_dispatch:
-    inputs:
-      folder_path:
-        description: "Exact folder path inside Scout Clone"
-        required: true
-        type: string
-
-      build_type:
-        description: "Promotion type"
-        required: true
-        type: choice
-        options:
-          - official-release
-          - official-hotfix
-
   repository_dispatch:
     types:
       - scout-to-fvp
@@ -32,192 +17,180 @@ jobs:
     steps:
 
       # ============================================================
-      # Resolve inputs
-      # Supports:
-      # 1. Manual workflow_dispatch
-      # 2. Power Automate / repository_dispatch
+      # 1. Read folder path sent by Power Automate
       # ============================================================
 
-      - name: Resolve promotion inputs
-        id: inputs
+      - name: Resolve folder path
+        id: resolve
         shell: pwsh
+        env:
+          INPUT_FOLDER_PATH: ${{ github.event.client_payload.folder_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-
-              $folderPath = "${{ inputs.folder_path }}"
-              $buildType  = "${{ inputs.build_type }}"
-
-          } elseif ("${{ github.event_name }}" -eq "repository_dispatch") {
-
-              $folderPath = "${{ github.event.client_payload.folder_path }}"
-              $buildType  = "${{ github.event.client_payload.build_type }}"
-
-          } else {
-
-              throw "Unsupported trigger: ${{ github.event_name }}"
-
-          }
-
-          $folderPath = $folderPath.Trim()
-          $folderPath = $folderPath.Replace('\', '/')
-          $folderPath = $folderPath.Trim('/')
-
-          $buildType = $buildType.Trim().ToLower()
+          $folderPath = "$env:INPUT_FOLDER_PATH".Trim()
 
           if ([string]::IsNullOrWhiteSpace($folderPath)) {
-              throw "folder_path cannot be empty."
+              throw "Power Automate did not provide client_payload.folder_path."
           }
 
+          # Normalize slashes
+          $folderPath = $folderPath.Replace('\', '/').Trim('/')
+
+          # Power Automate may send a complete Artifactory URL.
+          # If so, extract everything after the Scout Clone repository name.
+          $repoMarker = "$env:SOURCE_REPO/"
+
+          if ($folderPath.Contains($repoMarker)) {
+              $folderPath = $folderPath.Substring(
+                  $folderPath.IndexOf($repoMarker) + $repoMarker.Length
+              )
+          }
+
+          $folderPath = $folderPath.Trim('/')
+
+          if ([string]::IsNullOrWhiteSpace($folderPath)) {
+              throw "Unable to determine the Scout Clone folder path."
+          }
+
+          Write-Host ""
           Write-Host "============================================"
-          Write-Host "Scout -> FVP Promotion"
+          Write-Host "Scout Clone -> FVP"
           Write-Host "============================================"
-          Write-Host "Trigger     : ${{ github.event_name }}"
-          Write-Host "Build Type  : $buildType"
-          Write-Host "Folder Path : $folderPath"
+          Write-Host "Power Automate input:"
+          Write-Host "$env:INPUT_FOLDER_PATH"
+          Write-Host ""
+          Write-Host "Resolved relative path:"
+          Write-Host "$folderPath"
           Write-Host "============================================"
 
-          switch ($buildType) {
+          # --------------------------------------------------------
+          # FVP accepts Official_Release only.
+          # Daily_Builds must never reach FVP.
+          # --------------------------------------------------------
 
-              "official-release" {
+          if ($folderPath -match '(^|/)Daily_Builds(/|$)') {
+              throw "Daily builds are not allowed to be promoted to FVP."
+          }
 
-                  if ($folderPath -notmatch '(^|/)Official_Release(/|$)' -or
-                      $folderPath -notmatch '(^|/)Release(/|$)') {
-
-                      throw "official-release requires an Official_Release/.../Release path. Received: $folderPath"
-                  }
-
-              }
-
-              "official-hotfix" {
-
-                  if ($folderPath -notmatch '(^|/)Official_Release(/|$)' -or
-                      $folderPath -notmatch '(^|/)Hotfixes(/|$)') {
-
-                      throw "official-hotfix requires an Official_Release/.../Hotfixes/... path. Received: $folderPath"
-                  }
-
-              }
-
-              "daily" {
-
-                  throw "Daily builds are not permitted for FVP promotion."
-
-              }
-
-              default {
-
-                  throw "Unsupported build_type: $buildType. Expected official-release or official-hotfix."
-
-              }
+          if ($folderPath -notmatch '^Official_Release/') {
+              throw "Only folders under Official_Release can be promoted to FVP. Received: $folderPath"
           }
 
           "folder_path=$folderPath" >> $env:GITHUB_OUTPUT
-          "build_type=$buildType"   >> $env:GITHUB_OUTPUT
 
 
       # ============================================================
-      # Configure JFrog
-      #
-      # Both repositories are Scout JFrog Cloud.
-      # Only one server configuration is required.
+      # 2. Setup JFrog CLI
       # ============================================================
 
-      - name: Configure Scout JFrog
-        shell: pwsh
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
         env:
-          JFROG_URL: ${{ secrets.TARGET_URL }}
-          JFROG_TOKEN: ${{ secrets.TARGET_ACCESS_TOKEN }}
+          JF_URL: ${{ secrets.TARGET_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.TARGET_ACCESS_TOKEN }}
+
+
+      # ============================================================
+      # 3. Verify JFrog connection
+      # ============================================================
+
+      - name: Verify JFrog connection
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          jf c remove scout-fvp --quiet 2>$null
+          Write-Host "Checking Scout JFrog connection..."
 
-          jf c add scout-fvp `
-            --url="$env:JFROG_URL" `
-            --access-token="$env:JFROG_TOKEN" `
-            --interactive=false
+          jf rt ping
 
-          jf rt ping --server-id=scout-fvp
+          Write-Host "Scout JFrog connection successful." `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # Show exact source -> destination
+      # 4. Display exact Clone -> FVP mapping
       # ============================================================
 
       - name: Show promotion mapping
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.inputs.outputs.folder_path }}
-          BUILD_TYPE: ${{ steps.inputs.outputs.build_type }}
+          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $source = "$env:SOURCE_REPO/$env:FOLDER_PATH"
-          $target = "$env:TARGET_REPO/$env:FOLDER_PATH"
+          $sourcePath = "$env:SOURCE_REPO/$env:FOLDER_PATH"
+          $targetPath = "$env:TARGET_REPO/$env:FOLDER_PATH"
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "FVP PROMOTION"
           Write-Host "============================================"
-          Write-Host "Build Type:"
-          Write-Host "  $env:BUILD_TYPE"
           Write-Host ""
           Write-Host "SOURCE:"
-          Write-Host "  $source"
+          Write-Host "$sourcePath"
           Write-Host ""
           Write-Host "TARGET:"
-          Write-Host "  $target"
+          Write-Host "$targetPath"
+          Write-Host ""
           Write-Host "============================================"
 
 
       # ============================================================
-      # Verify source exists
+      # 5. Verify the source has artifacts
       # ============================================================
 
-      - name: Verify source folder
+      - name: Verify Scout Clone source
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.inputs.outputs.folder_path }}
+          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
           $sourcePattern = "$env:SOURCE_REPO/$env:FOLDER_PATH/*"
 
-          Write-Host "Checking:"
-          Write-Host $sourcePattern
+          Write-Host ""
+          Write-Host "Checking Scout Clone source:"
+          Write-Host "$sourcePattern"
+          Write-Host ""
 
           jf rt search `
-            "$sourcePattern" `
-            --server-id=scout-fvp `
-            --limit=1 `
-            --fail-no-op
+              "$sourcePattern" `
+              --recursive=true `
+              --limit=1 `
+              --fail-no-op
+
+          Write-Host ""
+          Write-Host "Source folder found." `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # Scout Clone -> FVP
+      # 6. Copy COMPLETE folder from Scout Clone to FVP
       #
-      # IMPORTANT:
-      # Destination receives EXACT same relative folder path.
+      # The same relative path is used at the destination.
       #
-      # Clone:
-      #   Official_Release/CWxx/Release/...
-      #
-      # FVP:
-      #   Official_Release/CWxx/Release/...
+      # Example:
       #
       # Clone:
-      #   Official_Release/CWxx/Hotfixes/HF01/...
+      # Official_Release/CW11/Release/...
       #
       # FVP:
-      #   Official_Release/CWxx/Hotfixes/HF01/...
+      # Official_Release/CW11/Release/...
+      #
+      # Hotfix:
+      #
+      # Clone:
+      # Official_Release/CW11/Hotfixes/HF01/...
+      #
+      # FVP:
+      # Official_Release/CW11/Hotfixes/HF01/...
       # ============================================================
 
-      - name: Copy Scout Clone to FVP
+      - name: Copy complete folder to FVP
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.inputs.outputs.folder_path }}
+          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -225,60 +198,60 @@ jobs:
           $target = "$env:TARGET_REPO/$env:FOLDER_PATH/"
 
           Write-Host ""
-          Write-Host "Copying Scout Clone -> FVP"
+          Write-Host "============================================"
+          Write-Host "COPYING COMPLETE FOLDER"
+          Write-Host "============================================"
           Write-Host ""
           Write-Host "Source:"
-          Write-Host $source
+          Write-Host "$source"
           Write-Host ""
-          Write-Host "Target:"
-          Write-Host $target
+          Write-Host "Destination:"
+          Write-Host "$target"
           Write-Host ""
 
           jf rt cp `
-            "$source*" `
-            "$target" `
-            --server-id=scout-fvp `
-            --recursive=true `
-            --flat=false `
-            --fail-no-op
+              "$source*" `
+              "$target" `
+              --recursive=true `
+              --flat=false `
+              --fail-no-op
 
           Write-Host ""
-          Write-Host "Promotion completed successfully." -ForegroundColor Green
+          Write-Host "Folder copied successfully." `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # Verify destination
+      # 7. Verify FVP destination
       # ============================================================
 
       - name: Verify FVP destination
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.inputs.outputs.folder_path }}
+          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
           $targetPattern = "$env:TARGET_REPO/$env:FOLDER_PATH/*"
 
           Write-Host ""
-          Write-Host "Verifying FVP:"
-          Write-Host $targetPattern
+          Write-Host "Verifying FVP destination:"
+          Write-Host "$targetPattern"
+          Write-Host ""
 
           jf rt search `
-            "$targetPattern" `
-            --server-id=scout-fvp `
-            --limit=1 `
-            --fail-no-op
+              "$targetPattern" `
+              --recursive=true `
+              --limit=1 `
+              --fail-no-op
 
           Write-Host ""
-          Write-Host "FVP verification successful." -ForegroundColor Green
-
-
-      # ================================== # Cleanup
-      # ============================================================
-
-      - name: Cleanup JFrog configuration
-        if: always()
-        shell: pwsh
-        run: |
-          jf c remove scout-fvp --quiet 2>$null
-          exit 0
+          Write-Host "============================================"
+          Write-Host "FVP PROMOTION SUCCESSFUL"
+          Write-Host "============================================"
+          Write-Host "Folder:"
+          Write-Host "$env:FOLDER_PATH"
+          Write-Host ""
+          Write-Host "All folder contents were copied to FVP."
+          Write-Host "============================================" `
+              -ForegroundColor Green
