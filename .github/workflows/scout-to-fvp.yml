@@ -16,6 +16,10 @@ jobs:
 
     steps:
 
+      # ============================================================
+      # 1. Resolve paths from Power Automate
+      # ============================================================
+
       - name: Resolve promotion paths
         id: resolve
         shell: pwsh
@@ -47,10 +51,6 @@ jobs:
 
           $sourcePath = $sourcePath.Trim('/')
 
-          if ([string]::IsNullOrWhiteSpace($sourcePath)) {
-              throw "Unable to determine Scout Clone source path."
-          }
-
           if ($sourcePath.StartsWith(
               "Official_Release/",
               [System.StringComparison]::OrdinalIgnoreCase
@@ -58,7 +58,6 @@ jobs:
 
               $promotionType = "official"
 
-              # Remove ONLY Official_Release/
               $targetPath = $sourcePath.Substring(
                   "Official_Release/".Length
               )
@@ -72,14 +71,10 @@ jobs:
               $targetPath = $sourcePath
           }
           else {
-              throw "Unsupported source path: $sourcePath"
+              throw "Unsupported promotion path: $sourcePath"
           }
 
           $targetPath = $targetPath.Trim('/')
-
-          if ([string]::IsNullOrWhiteSpace($targetPath)) {
-              throw "Unable to determine FVP target path."
-          }
 
           Write-Host ""
           Write-Host "============================================"
@@ -92,8 +87,11 @@ jobs:
 
           "source_path=$sourcePath" >> $env:GITHUB_OUTPUT
           "target_path=$targetPath" >> $env:GITHUB_OUTPUT
-          "promotion_type=$promotionType" >> $env:GITHUB_OUTPUT
 
+
+      # ============================================================
+      # 2. Setup JFrog
+      # ============================================================
 
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
@@ -107,15 +105,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if ([string]::IsNullOrWhiteSpace($env:JFROG_URL)) {
+          if ([string]::IsNullOrWhiteSpace("$env:JFROG_URL")) {
               throw "SCOUT_JFROG_URL secret is empty."
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:JFROG_TOKEN)) {
+          if ([string]::IsNullOrWhiteSpace("$env:JFROG_TOKEN")) {
               throw "SCOUT_JFROG_ACCESS_TOKEN secret is empty."
           }
-
-          Write-Host "Configuring Scout JFrog..."
 
           & jf c remove scout-fvp --quiet 2>$null
           $global:LASTEXITCODE = 0
@@ -129,55 +125,19 @@ jobs:
               throw "Failed to configure Scout JFrog."
           }
 
-          Write-Host "Testing Scout JFrog connection..."
-
-          & jf rt ping `
-              --server-id=scout-fvp
+          & jf rt ping --server-id=scout-fvp
 
           if ($LASTEXITCODE -ne 0) {
               throw "Scout JFrog connection failed."
           }
 
-          Write-Host "Scout JFrog connection successful." -ForegroundColor Green
+          Write-Host "Scout JFrog connection successful." `
+              -ForegroundColor Green
 
 
-      - name: Validate repositories
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace($env:SOURCE_REPO)) {
-              throw "SCOUT_CLONE_REPO secret is empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:TARGET_REPO)) {
-              throw "SCOUT_FVP_REPO secret is empty."
-          }
-
-          Write-Host ""
-          Write-Host "Source Repository : $env:SOURCE_REPO"
-          Write-Host "Target Repository : $env:TARGET_REPO"
-
-
-      - name: Show promotion mapping
-        shell: pwsh
-        env:
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
-          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "FVP PROMOTION MAPPING"
-          Write-Host "============================================"
-          Write-Host "SOURCE:"
-          Write-Host "$env:SOURCE_REPO/$env:SOURCE_PATH"
-          Write-Host ""
-          Write-Host "TARGET:"
-          Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
-          Write-Host "============================================"
-
+      # ============================================================
+      # 3. Verify Clone source
+      # ============================================================
 
       - name: Verify Scout Clone source
         shell: pwsh
@@ -189,7 +149,7 @@ jobs:
           $sourcePattern = "$env:SOURCE_REPO/$env:SOURCE_PATH/*"
 
           Write-Host ""
-          Write-Host "Checking Scout Clone source:"
+          Write-Host "Checking:"
           Write-Host "$sourcePattern"
 
           & jf rt search `
@@ -200,13 +160,35 @@ jobs:
               --fail-no-op
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout Clone source was not found: $env:SOURCE_PATH"
+              throw "Scout Clone source was not found."
           }
 
-          Write-Host "Scout Clone source verified." -ForegroundColor Green
 
+      # ============================================================
+      # 4. Create copy spec
+      #
+      # Everything BELOW source folder gets copied BELOW target.
+      #
+      # Official example:
+      #
+      # Clone:
+      # Official_Release/CW11/Release/
+      #   vw-group-commit-vault/...
+      #
+      # FVP:
+      # CW11/Release/
+      #   vw-group-commit-vault/...
+      #
+      # Hotfix:
+      #
+      # Clone:
+      # Official_Release/CW11/Hotfixes/HF01/...
+      #
+      # FVP:
+      # CW11/Hotfixes/HF01/...
+      # ============================================================
 
-      - name: Create JFrog copy spec
+      - name: Create copy spec
         id: copy_spec
         shell: pwsh
         env:
@@ -222,16 +204,14 @@ jobs:
           $sourcePattern = "$env:SOURCE_REPO/$env:SOURCE_PATH/(*)"
           $targetPattern = "$env:TARGET_REPO/$env:TARGET_PATH/{1}"
 
-          $fileEntry = [ordered]@{
-              pattern   = $sourcePattern
-              target    = $targetPattern
-              recursive = "true"
-              flat      = "true"
-          }
-
           $spec = [ordered]@{
               files = @(
-                  $fileEntry
+                  [ordered]@{
+                      pattern   = $sourcePattern
+                      target    = $targetPattern
+                      recursive = "true"
+                      flat      = "true"
+                  }
               )
           }
 
@@ -243,17 +223,18 @@ jobs:
               -Encoding UTF8
 
           Write-Host ""
-          Write-Host "Copy spec created:"
-          Write-Host "$specPath"
-          Write-Host ""
-          Write-Host "Source pattern:"
+          Write-Host "Source Pattern:"
           Write-Host "$sourcePattern"
           Write-Host ""
-          Write-Host "Target pattern:"
+          Write-Host "Target Pattern:"
           Write-Host "$targetPattern"
 
           "spec_path=$specPath" >> $env:GITHUB_OUTPUT
 
+
+      # ============================================================
+      # 5. Copy all contents
+      # ============================================================
 
       - name: Copy complete folder to FVP
         shell: pwsh
@@ -266,7 +247,7 @@ jobs:
 
           Write-Host ""
           Write-Host "============================================"
-          Write-Host "COPYING SCOUT CLONE TO FVP"
+          Write-Host "SCOUT CLONE TO FVP"
           Write-Host "============================================"
           Write-Host "Source:"
           Write-Host "$env:SOURCE_REPO/$env:SOURCE_PATH"
@@ -285,8 +266,13 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "Complete folder copied successfully." -ForegroundColor Green
+          Write-Host "Copy completed successfully." `
+              -ForegroundColor Green
 
+
+      # ============================================================
+      # 6. Verify FVP
+      # ============================================================
 
       - name: Verify FVP destination
         shell: pwsh
@@ -298,7 +284,7 @@ jobs:
           $targetPattern = "$env:TARGET_REPO/$env:TARGET_PATH/*"
 
           Write-Host ""
-          Write-Host "Verifying FVP:"
+          Write-Host "Verifying:"
           Write-Host "$targetPattern"
 
           & jf rt search `
@@ -316,19 +302,20 @@ jobs:
           Write-Host "============================================"
           Write-Host "FVP PROMOTION SUCCESSFUL"
           Write-Host "============================================"
-          Write-Host "FVP Path:"
           Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
           Write-Host "============================================"
 
 
-      - name: Cleanup JFrog configuration
+      # ============================================================
+      # 7. Cleanup
+      # ============================================================
+
+      - name: Cleanup
         if: always()
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-
-          Write-Host "Cleaning up JFrog configuration..."
 
           & jf c remove scout-fvp --quiet 2>$null
           $global:LASTEXITCODE = 0
