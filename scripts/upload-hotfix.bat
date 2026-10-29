@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+
 title Scout Hotfix Upload
 
 cls
@@ -14,13 +15,11 @@ REM LOCAL FOLDER
 REM ============================================================
 
 set "LOCAL_FOLDER="
-
 set /p "LOCAL_FOLDER=Enter Local Folder Path: "
 
 if "%LOCAL_FOLDER%"=="" (
     echo.
     echo ERROR: Local Folder Path is required.
-    echo.
     pause
     exit /b 1
 )
@@ -29,7 +28,6 @@ if not exist "%LOCAL_FOLDER%\" (
     echo.
     echo ERROR: Folder does not exist:
     echo %LOCAL_FOLDER%
-    echo.
     pause
     exit /b 1
 )
@@ -40,15 +38,12 @@ REM CALENDAR WEEK
 REM ============================================================
 
 echo.
-
 set "CW_PATH="
-
 set /p "CW_PATH=Enter CW Path (example CW11): "
 
 if "%CW_PATH%"=="" (
     echo.
     echo ERROR: CW Path is required.
-    echo.
     pause
     exit /b 1
 )
@@ -59,23 +54,35 @@ REM HOTFIX NAME
 REM ============================================================
 
 echo.
-
 set "HF_NAME="
-
 set /p "HF_NAME=Enter HF Name (example HF01): "
 
 if "%HF_NAME%"=="" (
     echo.
     echo ERROR: HF Name is required.
-    echo.
     pause
     exit /b 1
 )
 
 
 REM ============================================================
-REM POWERSHELL SCRIPT
-REM upload-hotfix.ps1 must be beside this BAT file.
+REM NORMALIZE CW AND HF TO UPPERCASE
+REM ============================================================
+
+for /f "delims=" %%A in ('powershell -NoProfile -Command "'%CW_PATH%'.Trim().ToUpperInvariant()"') do set "CW_PATH=%%A"
+
+for /f "delims=" %%A in ('powershell -NoProfile -Command "'%HF_NAME%'.Trim().ToUpperInvariant()"') do set "HF_NAME=%%A"
+
+
+REM ============================================================
+REM GET LOCAL FOLDER NAME
+REM ============================================================
+
+for %%F in ("%LOCAL_FOLDER%") do set "FOLDER_NAME=%%~nxF"
+
+
+REM ============================================================
+REM FIND POWERSHELL SCRIPT
 REM ============================================================
 
 set "PS_SCRIPT=%~dp0upload-hotfix.ps1"
@@ -97,10 +104,8 @@ if not exist "%PS_SCRIPT%" (
 
 
 REM ============================================================
-REM DISPLAY REQUEST
+REM DISPLAY NORMALIZED CONFIGURATION
 REM ============================================================
-
-for %%F in ("%LOCAL_FOLDER%") do set "FOLDER_NAME=%%~nxF"
 
 echo.
 echo ==============================================
@@ -125,6 +130,11 @@ echo.
 echo ==============================================
 echo.
 
+
+REM ============================================================
+REM CONFIRM
+REM ============================================================
+
 choice /C YN /M "Continue with upload"
 
 if errorlevel 2 (
@@ -137,12 +147,7 @@ if errorlevel 2 (
 
 
 REM ============================================================
-REM RUN POWERSHELL
-REM
-REM PowerShell will securely ask:
-REM Enter Scout JFrog Access Token
-REM
-REM Token characters are NOT shown.
+REM RUN POWERSHELL UPLOADER
 REM ============================================================
 
 echo.
@@ -168,7 +173,6 @@ REM ============================================================
 echo.
 
 if not "%EXIT_CODE%"=="0" (
-
     echo ==============================================
     echo              UPLOAD FAILED
     echo ==============================================
@@ -177,9 +181,7 @@ if not "%EXIT_CODE%"=="0" (
     echo.
     echo Check the error above for details.
     echo.
-
     pause
-
     exit /b %EXIT_CODE%
 )
 
