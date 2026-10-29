@@ -5,9 +5,13 @@ on:
     types:
       - scout-to-fvp
 
+
 jobs:
+
   promote-to-fvp:
+
     name: Promote Scout Clone to FVP
+
     runs-on: self-hosted
 
     env:
@@ -17,7 +21,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Resolve paths from Power Automate
+      # 1. Resolve Scout and FVP paths
       # ============================================================
 
       - name: Resolve promotion paths
@@ -25,6 +29,7 @@ jobs:
         shell: pwsh
         env:
           INPUT_FOLDER_PATH: ${{ github.event.client_payload.folder_path }}
+
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -34,7 +39,13 @@ jobs:
               throw "Power Automate did not provide client_payload.folder_path."
           }
 
-          $sourcePath = $sourcePath.Replace('\', '/').Trim('/')
+          $sourcePath =
+              $sourcePath.Replace('\', '/').Trim('/')
+
+
+          # --------------------------------------------------------
+          # Accept full Artifactory URL if sent
+          # --------------------------------------------------------
 
           $repoMarker = "$env:SOURCE_REPO/"
 
@@ -44,6 +55,7 @@ jobs:
           )
 
           if ($markerPosition -ge 0) {
+
               $sourcePath = $sourcePath.Substring(
                   $markerPosition + $repoMarker.Length
               )
@@ -51,67 +63,96 @@ jobs:
 
           $sourcePath = $sourcePath.Trim('/')
 
-          if ($sourcePath.StartsWith(
-              "Official_Release/",
-              [System.StringComparison]::OrdinalIgnoreCase
-          )) {
 
-              $promotionType = "official"
+          # --------------------------------------------------------
+          # Official
+          #
+          # Scout:
+          # Official_Release/CW11/Hotfixes/HF01
+          #
+          # FVP:
+          # CW11/Hotfixes/HF01
+          # --------------------------------------------------------
+
+          if (
+              $sourcePath.StartsWith(
+                  "Official_Release/",
+                  [System.StringComparison]::OrdinalIgnoreCase
+              )
+          ) {
 
               $targetPath = $sourcePath.Substring(
                   "Official_Release/".Length
               )
           }
-          elseif ($sourcePath.StartsWith(
-              "Daily_Builds/",
-              [System.StringComparison]::OrdinalIgnoreCase
-          )) {
 
-              $promotionType = "daily"
+
+          # --------------------------------------------------------
+          # Daily
+          #
+          # Preserve Daily_Builds path
+          # --------------------------------------------------------
+
+          elseif (
+              $sourcePath.StartsWith(
+                  "Daily_Builds/",
+                  [System.StringComparison]::OrdinalIgnoreCase
+              )
+          ) {
+
               $targetPath = $sourcePath
           }
+
           else {
-              throw "Unsupported promotion path: $sourcePath"
+
+              throw "Unsupported Scout promotion path: $sourcePath"
           }
+
 
           $targetPath = $targetPath.Trim('/')
 
+
           Write-Host ""
           Write-Host "============================================"
-          Write-Host "SCOUT CLONE TO FVP"
+          Write-Host "SCOUT CLONE -> FVP"
           Write-Host "============================================"
-          Write-Host "Promotion Type : $promotionType"
-          Write-Host "Source Path    : $sourcePath"
-          Write-Host "Target Path    : $targetPath"
+
+          Write-Host ""
+          Write-Host "Scout Source:"
+          Write-Host "$env:SOURCE_REPO/$sourcePath"
+
+          Write-Host ""
+          Write-Host "FVP Target:"
+          Write-Host "$env:TARGET_REPO/$targetPath"
+
+          Write-Host ""
           Write-Host "============================================"
+
 
           "source_path=$sourcePath" >> $env:GITHUB_OUTPUT
           "target_path=$targetPath" >> $env:GITHUB_OUTPUT
 
 
       # ============================================================
-      # 2. Setup JFrog
+      # 2. Setup JFrog CLI
       # ============================================================
 
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
 
 
+      # ============================================================
+      # 3. Configure Scout
+      # ============================================================
+
       - name: Configure Scout JFrog
         shell: pwsh
         env:
           JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JFROG_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+
         run: |
           $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace("$env:JFROG_URL")) {
-              throw "SCOUT_JFROG_URL secret is empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace("$env:JFROG_TOKEN")) {
-              throw "SCOUT_JFROG_ACCESS_TOKEN secret is empty."
-          }
 
           & jf c remove scout-fvp --quiet 2>$null
           $global:LASTEXITCODE = 0
@@ -121,7 +162,7 @@ jobs:
               --access-token="$env:JFROG_TOKEN" `
               --interactive=false
 
-          if ($LASTEXITCODE -ne 0) {
+ if ($LASTEXITCODE -ne 0) {
               throw "Failed to configure Scout JFrog."
           }
 
@@ -131,22 +172,21 @@ jobs:
               throw "Scout JFrog connection failed."
           }
 
-          Write-Host "Scout JFrog connection successful." `
-              -ForegroundColor Green
-
 
       # ============================================================
-      # 3. Verify Clone source
+      # 4. Verify source
       # ============================================================
 
       - name: Verify Scout Clone source
         shell: pwsh
         env:
           SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $sourcePattern = "$env:SOURCE_REPO/$env:SOURCE_PATH/*"
+          $sourcePattern =
+              "$env:SOURCE_REPO/$env:SOURCE_PATH/*"
 
           Write-Host ""
           Write-Host "Checking:"
@@ -165,27 +205,15 @@ jobs:
 
 
       # ============================================================
-      # 4. Create copy spec
+      # 5. Create copy spec
       #
-      # Everything BELOW source folder gets copied BELOW target.
+      # Copies only contents BELOW source root.
       #
-      # Official example:
-      #
-      # Clone:
-      # Official_Release/CW11/Release/
-      #   vw-group-commit-vault/...
+      # Scout:
+      # Official_Release/CW11/Hotfixes/HF01/
       #
       # FVP:
-      # CW11/Release/
-      #   vw-group-commit-vault/...
-      #
-      # Hotfix:
-      #
-      # Clone:
-      # Official_Release/CW11/Hotfixes/HF01/...
-      #
-      # FVP:
-      # CW11/Hotfixes/HF01/...
+      # CW11/Hotfixes/HF01/
       # ============================================================
 
       - name: Create copy spec
@@ -194,67 +222,74 @@ jobs:
         env:
           SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
           TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
+
         run: |
           $ErrorActionPreference = 'Stop'
 
           $specPath = Join-Path `
               $env:RUNNER_TEMP `
-              "scout-to-fvp-copy-spec.json"
+              "scout-to-fvp-copy.json"
 
-          $sourcePattern = "$env:SOURCE_REPO/$env:SOURCE_PATH/(*)"
-          $targetPattern = "$env:TARGET_REPO/$env:TARGET_PATH/{1}"
+          $sourcePattern =
+              "$env:SOURCE_REPO/$env:SOURCE_PATH/(*)"
+
+          $targetPattern =
+              "$env:TARGET_REPO/$env:TARGET_PATH/{1}"
+
 
           $spec = [ordered]@{
+
               files = @(
+
                   [ordered]@{
-                      pattern   = $sourcePattern
-                      target    = $targetPattern
+
+                      pattern = $sourcePattern
+
+                      target = $targetPattern
+
                       recursive = "true"
-                      flat      = "true"
+
+                      flat = "true"
                   }
               )
           }
 
-          $specJson = $spec | ConvertTo-Json -Depth 10
+
+          $specJson =
+              $spec |
+              ConvertTo-Json -Depth 10
+
 
           Set-Content `
               -LiteralPath $specPath `
               -Value $specJson `
               -Encoding UTF8
 
+
           Write-Host ""
-          Write-Host "Source Pattern:"
+          Write-Host "Source:"
           Write-Host "$sourcePattern"
+
           Write-Host ""
-          Write-Host "Target Pattern:"
+          Write-Host "Target:"
           Write-Host "$targetPattern"
+
 
           "spec_path=$specPath" >> $env:GITHUB_OUTPUT
 
 
       # ============================================================
-      # 5. Copy all contents
+      # 6. Copy complete approved folder
       # ============================================================
 
-      - name: Copy complete folder to FVP
+      - name: Copy Scout Clone to FVP
         shell: pwsh
         env:
-          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
-          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
           SPEC_PATH: ${{ steps.copy_spec.outputs.spec_path }}
+          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
+
         run: |
           $ErrorActionPreference = 'Stop'
-
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "SCOUT CLONE TO FVP"
-          Write-Host "============================================"
-          Write-Host "Source:"
-          Write-Host "$env:SOURCE_REPO/$env:SOURCE_PATH"
-          Write-Host ""
-          Write-Host "Target:"
-          Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
-          Write-Host ""
 
           & jf rt cp `
               --spec="$env:SPEC_PATH" `
@@ -266,26 +301,24 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "Copy completed successfully." `
+          Write-Host "Scout -> FVP copy successful." `
               -ForegroundColor Green
 
 
       # ============================================================
-      # 6. Verify FVP
+      # 7. Verify FVP
       # ============================================================
 
-      - name: Verify FVP destination
+      - name: Verify FVP
         shell: pwsh
         env:
           TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
+
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $targetPattern = "$env:TARGET_REPO/$env:TARGET_PATH/*"
-
-          Write-Host ""
-          Write-Host "Verifying:"
-          Write-Host "$targetPattern"
+          $targetPattern =
+              "$env:TARGET_REPO/$env:TARGET_PATH/*"
 
           & jf rt search `
               "$targetPattern" `
@@ -295,41 +328,52 @@ jobs:
               --fail-no-op
 
           if ($LASTEXITCODE -ne 0) {
-              throw "FVP destination verification failed."
+              throw "FVP verification failed."
           }
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "FVP PROMOTION SUCCESSFUL"
           Write-Host "============================================"
+
+          Write-Host ""
           Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
-          Write-Host "============================================"
+
+          Write-Host ""
+          Write-Host "============================================" `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # 7. Cleanup
+      # 8. Cleanup
       # ============================================================
 
       - name: Cleanup
         if: always()
         continue-on-error: true
         shell: pwsh
+
         run: |
           $ErrorActionPreference = 'Continue'
 
           & jf c remove scout-fvp --quiet 2>$null
+
           $global:LASTEXITCODE = 0
+
 
           $specPath = Join-Path `
               $env:RUNNER_TEMP `
-              "scout-to-fvp-copy-spec.json"
+              "scout-to-fvp-copy.json"
+
 
           if (Test-Path -LiteralPath $specPath) {
+
               Remove-Item `
                   -LiteralPath $specPath `
                   -Force `
                   -ErrorAction SilentlyContinue
           }
+
 
           Write-Host "Cleanup completed."
 
