@@ -17,10 +17,24 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Resolve folder path from Power Automate
+      # 1. Resolve paths from Power Automate
+      #
+      # Official:
+      # Source:
+      #   Official_Release/CW11/Release
+      #
+      # Target:
+      #   CW11/Release
+      #
+      # Daily:
+      # Source:
+      #   Daily_Builds/2026-10-29/...
+      #
+      # Target:
+      #   Daily_Builds/2026-10-29/...
       # ============================================================
 
-      - name: Resolve folder path
+      - name: Resolve promotion paths
         id: resolve
         shell: pwsh
         env:
@@ -28,63 +42,96 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $folderPath = "$env:INPUT_FOLDER_PATH".Trim()
+          $sourcePath = "$env:INPUT_FOLDER_PATH".Trim()
 
-          if ([string]::IsNullOrWhiteSpace($folderPath)) {
+          if ([string]::IsNullOrWhiteSpace($sourcePath)) {
               throw "Power Automate did not provide client_payload.folder_path."
           }
 
-          $folderPath = $folderPath.Replace('\', '/').Trim('/')
+          # Normalize separators
+          $sourcePath = $sourcePath.Replace('\', '/').Trim('/')
 
-          # If Power Automate sends complete Artifactory URL,
-          # extract path after Scout Clone repository.
+          # If Power Automate sends the complete Artifactory URL,
+          # extract everything after the Scout Clone repository name.
           $repoMarker = "$env:SOURCE_REPO/"
 
-          if ($folderPath.Contains($repoMarker)) {
-              $markerPosition = $folderPath.IndexOf($repoMarker)
+          if ($sourcePath.Contains($repoMarker)) {
 
-              $folderPath = $folderPath.Substring(
+              $markerPosition = $sourcePath.IndexOf($repoMarker)
+
+              $sourcePath = $sourcePath.Substring(
                   $markerPosition + $repoMarker.Length
               )
           }
 
-          $folderPath = $folderPath.Trim('/')
+          $sourcePath = $sourcePath.Trim('/')
 
-          if ([string]::IsNullOrWhiteSpace($folderPath)) {
-              throw "Unable to determine Scout Clone folder path."
+          if ([string]::IsNullOrWhiteSpace($sourcePath)) {
+              throw "Unable to determine Scout Clone source path."
           }
 
-          $isOfficial = $folderPath -match '^Official_Release/'
-          $isDaily    = $folderPath -match '^Daily_Builds/'
+          # ========================================================
+          # Official Release / Hotfix
+          #
+          # Remove ONLY "Official_Release/" from destination.
+          # ========================================================
 
-          if (-not $isOfficial -and -not $isDaily) {
-              throw "Unsupported FVP path '$folderPath'. Expected Official_Release/... or Daily_Builds/..."
+          if ($sourcePath -match '^Official_Release/(.+)$') {
+
+              $promotionType = "official"
+
+              $targetPath = $Matches[1]
+
+          }
+
+          # ========================================================
+          # Daily
+          #
+          # Preserve Daily_Builds hierarchy.
+          # ========================================================
+
+          elseif ($sourcePath -match '^Daily_Builds/(.+)$') {
+
+              $promotionType = "daily"
+
+              $targetPath = $sourcePath
+
+          }
+
+          else {
+
+              throw "Unsupported FVP path '$sourcePath'. Expected Official_Release/... or Daily_Builds/..."
+
+          }
+
+          $targetPath = $targetPath.Trim('/')
+
+          if ([string]::IsNullOrWhiteSpace($targetPath)) {
+              throw "Unable to determine FVP destination path."
           }
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "SCOUT CLONE -> FVP"
           Write-Host "============================================"
-          Write-Host "Trigger:"
-          Write-Host "${{ github.event_name }}"
           Write-Host ""
-          Write-Host "Received from Power Automate:"
+          Write-Host "Received:"
           Write-Host "$env:INPUT_FOLDER_PATH"
           Write-Host ""
-          Write-Host "Resolved folder path:"
-          Write-Host "$folderPath"
-
-          if ($isOfficial) {
-              Write-Host "Promotion category: Official"
-          }
-
-          if ($isDaily) {
-              Write-Host "Promotion category: Daily"
-          }
-
+          Write-Host "Promotion Type:"
+          Write-Host "$promotionType"
+          Write-Host ""
+          Write-Host "Scout Clone relative path:"
+          Write-Host "$sourcePath"
+          Write-Host ""
+          Write-Host "FVP relative path:"
+          Write-Host "$targetPath"
+          Write-Host ""
           Write-Host "============================================"
 
-          "folder_path=$folderPath" >> $env:GITHUB_OUTPUT
+          "source_path=$sourcePath" >> $env:GITHUB_OUTPUT
+          "target_path=$targetPath" >> $env:GITHUB_OUTPUT
+          "promotion_type=$promotionType" >> $env:GITHUB_OUTPUT
 
 
       # ============================================================
@@ -118,8 +165,6 @@ jobs:
           Write-Host ""
           Write-Host "Configuring Scout JFrog..."
 
-          # Remove previous runner configuration if present.
-          # Ignore failure because configuration may not exist.
           jf c remove scout-fvp --quiet 2>$null
           $global:LASTEXITCODE = 0
 
@@ -135,21 +180,23 @@ jobs:
           Write-Host ""
           Write-Host "Testing Scout JFrog connection..."
 
-          jf rt ping --server-id=scout-fvp
+          jf rt ping `
+              --server-id=scout-fvp
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout JFrog connection failed with exit code $LASTEXITCODE."
+              throw "Scout JFrog connection failed."
           }
 
           Write-Host ""
-          Write-Host "Scout JFrog connection successful." -ForegroundColor Green
+          Write-Host "Scout JFrog connection successful." `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # 4. Validate repository secrets
+      # 4. Validate repository configuration
       # ============================================================
 
-      - name: Validate Scout repositories
+      - name: Validate repositories
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -163,61 +210,58 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "============================================"
-          Write-Host "SCOUT REPOSITORIES"
-          Write-Host "============================================"
-          Write-Host "Source:"
+          Write-Host "Source repository:"
           Write-Host "$env:SOURCE_REPO"
+
           Write-Host ""
-          Write-Host "Target:"
+          Write-Host "FVP repository:"
           Write-Host "$env:TARGET_REPO"
-          Write-Host "============================================"
 
 
       # ============================================================
-      # 5. Display exact source -> destination
+      # 5. Display mapping
       # ============================================================
 
       - name: Show promotion mapping
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
         run: |
           $ErrorActionPreference = 'Stop'
-
-          $sourcePath = "$env:SOURCE_REPO/$env:FOLDER_PATH"
-          $targetPath = "$env:TARGET_REPO/$env:FOLDER_PATH"
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "FVP PROMOTION MAPPING"
           Write-Host "============================================"
+
           Write-Host ""
           Write-Host "SOURCE:"
-          Write-Host "$sourcePath"
+          Write-Host "$env:SOURCE_REPO/$env:SOURCE_PATH"
+
           Write-Host ""
           Write-Host "TARGET:"
-          Write-Host "$targetPath"
+          Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
+
           Write-Host ""
-          Write-Host "Complete hierarchy will be preserved."
           Write-Host "============================================"
 
 
       # ============================================================
-      # 6. Verify Scout Clone source
+      # 6. Verify source folder
       # ============================================================
 
       - name: Verify Scout Clone source
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $sourcePattern = "$env:SOURCE_REPO/$env:FOLDER_PATH/*"
+          $sourcePattern = "$env:SOURCE_REPO/$env:SOURCE_PATH/*"
 
           Write-Host ""
-          Write-Host "Checking Scout Clone:"
+          Write-Host "Checking:"
           Write-Host "$sourcePattern"
           Write-Host ""
 
@@ -229,63 +273,64 @@ jobs:
               --fail-no-op
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout Clone source not found or contains no artifacts: $env:FOLDER_PATH"
+              throw "Scout Clone source folder does not exist or contains no artifacts."
           }
 
           Write-Host ""
-          Write-Host "Scout Clone source verified." -ForegroundColor Green
+          Write-Host "Scout Clone source verified." `
+              -ForegroundColor Green
 
 
       # ============================================================
-      # 7. Copy complete folder to FVP
+      # 7. Copy complete folder
       #
-      # Official example:
+      # OFFICIAL
       #
-      # Scout Clone:
-      # Official_Release/CW11/Release/...
+      # SOURCE:
+      # rvtm-vw-rvt-scout-build-binaries-clone/
+      # Official_Release/
+      # CW11/
+      # Release/
       #
-      # FVP:
-      # Official_Release/CW11/Release/...
+      # TARGET:
+      # eeint2-Scout-FVP-Release/
+      # CW11/
+      # Release/
       #
-      # Hotfix example:
       #
-      # Scout Clone:
+      # HOTFIX
+      #
+      # SOURCE:
       # Official_Release/CW11/Hotfixes/HF01/...
       #
-      # FVP:
-      # Official_Release/CW11/Hotfixes/HF01/...
-      #
-      # Daily example:
-      #
-      # Scout Clone:
-      # Daily_Builds/2026-10-29/...
-      #
-      # FVP:
-      # Daily_Builds/2026-10-29/...
-      #
-      # No temporary/local download.
+      # TARGET:
+      # CW11/Hotfixes/HF01/...
       # ============================================================
 
-      - name: Copy complete Scout Clone folder to FVP
+      - name: Copy complete folder to FVP
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
+          SOURCE_PATH: ${{ steps.resolve.outputs.source_path }}
+          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $source = "$env:SOURCE_REPO/$env:FOLDER_PATH/"
-          $target = "$env:TARGET_REPO/$env:FOLDER_PATH/"
+          $source = "$env:SOURCE_REPO/$env:SOURCE_PATH/"
+          $target = "$env:TARGET_REPO/$env:TARGET_PATH/"
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "COPYING SCOUT CLONE -> FVP"
           Write-Host "============================================"
+
           Write-Host ""
           Write-Host "Source:"
           Write-Host "$source"
+
           Write-Host ""
           Write-Host "Target:"
           Write-Host "$target"
+
           Write-Host ""
 
           jf rt cp `
@@ -297,11 +342,12 @@ jobs:
               --fail-no-op
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout Clone -> FVP copy failed with exit code $LASTEXITCODE."
+              throw "Scout Clone -> FVP copy failed."
           }
 
           Write-Host ""
-          Write-Host "Complete folder copied successfully." -ForegroundColor Green
+          Write-Host "Complete folder copied successfully." `
+              -ForegroundColor Green
 
 
       # ============================================================
@@ -311,14 +357,14 @@ jobs:
       - name: Verify FVP destination
         shell: pwsh
         env:
-          FOLDER_PATH: ${{ steps.resolve.outputs.folder_path }}
+          TARGET_PATH: ${{ steps.resolve.outputs.target_path }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $targetPattern = "$env:TARGET_REPO/$env:FOLDER_PATH/*"
+          $targetPattern = "$env:TARGET_REPO/$env:TARGET_PATH/*"
 
           Write-Host ""
-          Write-Host "Verifying FVP destination:"
+          Write-Host "Verifying FVP:"
           Write-Host "$targetPattern"
           Write-Host ""
 
@@ -330,29 +376,27 @@ jobs:
               --fail-no-op
 
           if ($LASTEXITCODE -ne 0) {
-              throw "FVP destination verification failed: $env:FOLDER_PATH"
+              throw "FVP destination verification failed."
           }
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "FVP PROMOTION SUCCESSFUL"
           Write-Host "============================================"
-          Write-Host "Folder:"
-          Write-Host "$env:FOLDER_PATH"
           Write-Host ""
-          Write-Host "Target:"
-          Write-Host "$env:TARGET_REPO/$env:FOLDER_PATH"
-          Write-Host "============================================" `
-              -ForegroundColor Green
+          Write-Host "FVP path:"
+          Write-Host "$env:TARGET_REPO/$env:TARGET_PATH"
+          Write-Host ""
+          =============
 
+      - name: Cleanup JFrog configuration
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
 
-      # ============================================================
-      # 9. Cleanup
-      #
-      # This step must never make an otherwise successful
-      # promotion fail.
-      # ============================================================
-p JFrog CLI configuration..."
+          Write-Host "Cleaning up JFrog configuration..."
 
           jf c remove scout-fvp --quiet
 
