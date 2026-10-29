@@ -10,105 +10,73 @@ param (
     [string]$HFName,
 
     [Parameter(Mandatory = $false)]
-    [string]$AccessToken
+    [string]$AccessToken = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-# ============================================================
-# SCOUT CONFIGURATION
-# ============================================================
-
-$JFROG_URL = "https://artifactory.sctmtrs.xyz/artifactory"
-$SCOUT_REPO = "rvtm-vw-rvt-scout-build-binaries-clone"
-
 
 # ============================================================
-# FUNCTION: URL-ENCODE ARTIFACTORY PATH
+# CONFIGURATION
 # ============================================================
 
-function ConvertTo-ArtifactoryPath {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
+$JFrogUrl = "https://artifactory.sctmtrs.xyz/artifactory"
 
-    $segments = $Path.Replace("\", "/").Split(
-        "/",
-        [System.StringSplitOptions]::RemoveEmptyEntries
-    )
-
-    $encodedSegments = foreach ($segment in $segments) {
-        [System.Uri]::EscapeDataString($segment)
-    }
-
-    return ($encodedSegments -join "/")
-}
-
-
-# ============================================================
-# FUNCTION: READ TOKEN SECURELY
-# ============================================================
-
-function Read-AccessToken {
-    $secureToken = Read-Host `
-        "Enter Scout JFrog Access Token" `
-        -AsSecureString
-
-    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-        $secureToken
-    )
-
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
-            $pointer
-        )
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(
-            $pointer
-        )
-    }
-}
+$ScoutRepository = "rvtm-vw-rvt-scout-build-binaries-clone"
 
 
 # ============================================================
 # NORMALIZE INPUTS
 # ============================================================
 
-$LocalFolder = $LocalFolder.Trim().TrimEnd("\", "/")
+$LocalFolder = $LocalFolder.Trim()
+$LocalFolder = $LocalFolder.TrimEnd('\')
+$LocalFolder = $LocalFolder.TrimEnd('/')
 
-$CWPath = $CWPath.Trim().Trim("\", "/").ToUpperInvariant()
+$CWPath = $CWPath.Trim()
+$CWPath = $CWPath.Trim('\')
+$CWPath = $CWPath.Trim('/')
+$CWPath = $CWPath.ToUpperInvariant()
 
-$HFName = $HFName.Trim().Trim("\", "/").ToUpperInvariant()
+$HFName = $HFName.Trim()
+$HFName = $HFName.Trim('\')
+$HFName = $HFName.Trim('/')
+$HFName = $HFName.ToUpperInvariant()
 
 
 # ============================================================
-# NORMALIZE OPTIONAL SHORT INPUTS
+# NORMALIZE CW
 #
-# User can enter:
-#   11   -> CW11
-#   cw11 -> CW11
-#
-# User can enter:
-#   01   -> HF01
-#   hf01 -> HF01
+# 11   -> CW11
+# cw11 -> CW11
+# Cw11 -> CW11
+# CW11 -> CW11
 # ============================================================
 
-if ($CWPath -match "^\d+$") {
+if ($CWPath -match '^[0-9]+$') {
     $CWPath = "CW$CWPath"
 }
 
-if ($HFName -match "^\d+$") {
+
+# ============================================================
+# NORMALIZE HF
+#
+# 01   -> HF01
+# hf01 -> HF01
+# Hf01 -> HF01
+# HF01 -> HF01
+# ============================================================
+
+if ($HFName -match '^[0-9]+$') {
     $HFName = "HF$HFName"
 }
 
 
 # ============================================================
-# VALIDATE LOCAL FOLDER
+# VALIDATE INPUTS
 # ============================================================
 
-if ([string]::IsNullOrWhiteSpace($LocalFolder)) {
+if ($LocalFolder.Length -eq 0) {
     throw "Local Folder cannot be empty."
 }
 
@@ -116,38 +84,36 @@ if (-not (Test-Path -LiteralPath $LocalFolder -PathType Container)) {
     throw "Local folder does not exist: $LocalFolder"
 }
 
-
-# ============================================================
-# VALIDATE CW
-# ============================================================
-
-if ([string]::IsNullOrWhiteSpace($CWPath)) {
+if ($CWPath.Length -eq 0) {
     throw "CW Path cannot be empty."
 }
 
-if ($CWPath -notmatch "^CW.+$") {
-    throw "CW Path must start with CW. Example: CW11"
+if ($CWPath -notmatch '^CW[0-9]+.*$') {
+    throw "Invalid CW Path: $CWPath. Example: CW11"
 }
 
-if ($CWPath.Contains("/") -or $CWPath.Contains("\")) {
-    throw "CW Path must be one folder name. Example: CW11"
+if ($CWPath.Contains('/')) {
+    throw "CW Path cannot contain /"
 }
 
+if ($CWPath.Contains('\')) {
+    throw "CW Path cannot contain \"
+}
 
-# ============================================================
-# VALIDATE HOTFIX NAME
-# ============================================================
-
-if ([string]::IsNullOrWhiteSpace($HFName)) {
+if ($HFName.Length -eq 0) {
     throw "HF Name cannot be empty."
 }
 
-if ($HFName -notmatch "^HF.+$") {
-    throw "HF Name must start with HF. Example: HF01"
+if ($HFName -notmatch '^HF.+$') {
+    throw "Invalid HF Name: $HFName. Example: HF01"
 }
 
-if ($HFName.Contains("/") -or $HFName.Contains("\")) {
-    throw "HF Name must be one folder name. Example: HF01"
+if ($HFName.Contains('/')) {
+    throw "HF Name cannot contain /"
+}
+
+if ($HFName.Contains('\')) {
+    throw "HF Name cannot contain \"
 }
 
 
@@ -155,58 +121,74 @@ if ($HFName.Contains("/") -or $HFName.Contains("\")) {
 # REQUEST SCOUT JFROG TOKEN
 # ============================================================
 
-if ([string]::IsNullOrWhiteSpace($AccessToken)) {
+if ($AccessToken.Length -eq 0) {
+
     Write-Host ""
-    Write-Host "Scout JFrog authentication required." `
-        -ForegroundColor Yellow
+    Write-Host "Scout JFrog authentication required." -ForegroundColor Yellow
     Write-Host ""
 
-    $AccessToken = Read-AccessToken
+    $SecureToken = Read-Host "Enter Scout JFrog Access Token" -AsSecureString
+
+    $Credential = New-Object `
+        System.Management.Automation.PSCredential `
+        -ArgumentList "token", $SecureToken
+
+    $AccessToken = $Credential.GetNetworkCredential().Password
 }
 
-if ([string]::IsNullOrWhiteSpace($AccessToken)) {
+
+if ($AccessToken.Length -eq 0) {
     throw "Scout JFrog Access Token cannot be empty."
 }
 
 
 # ============================================================
-# DETERMINE LOCAL ROOT FOLDER
+# GET LOCAL FOLDER NAME
 # ============================================================
 
-$folderItem = Get-Item -LiteralPath $LocalFolder
-$folderName = $folderItem.Name
+$FolderInfo = Get-Item -LiteralPath $LocalFolder
 
-if ([string]::IsNullOrWhiteSpace($folderName)) {
-    throw "Unable to determine the local root folder name."
+$FolderName = $FolderInfo.Name
+
+
+if ($FolderName.Length -eq 0) {
+    throw "Unable to determine local folder name."
 }
 
 
 # ============================================================
-# BUILD DYNAMIC SCOUT TARGET
+# BUILD SCOUT DESTINATION
 #
 # Example:
 #
 # Local:
-# C:\Downloads\SACID F220
+# C:\Downloads\softwareartifact (1)
 #
-# Inputs:
+# CW:
 # cw11
+#
+# HF:
 # hf01
 #
 # Result:
-# Official_Release/CW11/Hotfixes/HF01/SACID F220
+#
+# Official_Release/
+#   CW11/
+#     Hotfixes/
+#       HF01/
+#         softwareartifact (1)/
 # ============================================================
 
-$promotionPath = "Official_Release/$CWPath/Hotfixes/$HFName"
+$PromotionPath = "Official_Release/$CWPath/Hotfixes/$HFName"
 
-$targetRoot = "$promotionPath/$folderName"
+$TargetRoot = "$PromotionPath/$FolderName"
 
 
 # ============================================================
-# FIND LOCAL FILES
+# FIND FILES
 # ============================================================
 
-$files = @(
+$Files = @(
     Get-ChildItem `
         -LiteralPath $LocalFolder `
         -File `
@@ -214,195 +196,268 @@ $files = @(
         -Force
 )
 
-if ($files.Count -eq 0) {
-    throw "No files were found inside: $LocalFolder"
+
+if ($Files.Count -eq 0) {
+    throw "No files found inside: $LocalFolder"
 }
 
 
 # ============================================================
-# DISPLAY NORMALIZED CONFIGURATION
+# DISPLAY CONFIGURATION
 # ============================================================
 
 Write-Host ""
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host "SCOUT HOTFIX UPLOAD"
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host ""
 Write-Host "Local Folder : $LocalFolder"
-Write-Host "Folder Name  : $folderName"
+Write-Host "Folder Name  : $FolderName"
 Write-Host "CW           : $CWPath"
 Write-Host "HF           : $HFName"
-Write-Host "Files        : $($files.Count)"
+Write-Host "Files Found  : $($Files.Count)"
 Write-Host ""
 Write-Host "Scout Target:"
-Write-Host "$SCOUT_REPO/$targetRoot"
+Write-Host "$ScoutRepository/$TargetRoot"
 Write-Host ""
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host ""
 
 
 # ============================================================
-# AUTHENTICATION HEADER
+# AUTHENTICATION
 # ============================================================
 
-$headers = @{
+$Headers = @{
     Authorization = "Bearer $AccessToken"
 }
 
 
 # ============================================================
-# UPLOAD COUNTERS
+# COUNTERS
 # ============================================================
 
-$uploaded = 0
-$skipped = 0
-$failed = 0
-$failedFiles = @()
+$UploadedCount = 0
+
+$SkippedCount = 0
+
+$FailedCount = 0
+
+$FailedFiles = @()
 
 
 # ============================================================
-# UPLOAD ALL FILES
-# =========================================================[System.IO.Path]::GetRelativePath(
+# UPLOAD EACH FILE
+# ============================================================
+
+foreach ($File in $Files) {
+
+    # --------------------------------------------------------
+    # Get path relative to selected local root
+    # --------------------------------------------------------
+
+    $RelativePath = [System.IO.Path]::GetRelativePath(
         $LocalFolder,
-        $file.FullName
+        $File.FullName
     )
 
-    $relativePath = $relativePath.Replace("\", "/")
+    $RelativePath = $RelativePath.Replace('\', '/')
 
 
     # --------------------------------------------------------
     # Skip checksum sidecar files
     #
-    # Artifactory interprets these as checksum deployments.
-    # These previously caused HTTP 409 checksum errors.
+    # These caused JFrog 409 checksum errors previously.
     # --------------------------------------------------------
 
-    $lowerName = $file.Name.ToLowerInvariant()
+    $LowerFileName = $File.Name.ToLowerInvariant()
 
-    $isChecksumFile = (
-        $lowerName.EndsWith(".sha256") -or
-        $lowerName.EndsWith(".sha1") -or
-        $lowerName.EndsWith(".md5")
-    )
+    $IsChecksum = $false
 
-    if ($isChecksumFile) {
-        Write-Host "SKIP    $relativePath" `
-            -ForegroundColor Yellow
+    if ($LowerFileName.EndsWith('.sha256')) {
+        $IsChecksum = $true
+    }
 
-        $skipped++
+    if ($LowerFileName.EndsWith('.sha1')) {
+        $IsChecksum = $true
+    }
+
+    if ($LowerFileName.EndsWith('.md5')) {
+        $IsChecksum = $true
+    }
+
+
+    if ($IsChecksum) {
+
+        Write-Host "SKIP    $RelativePath" -ForegroundColor Yellow
+
+        $SkippedCount = $SkippedCount + 1
+
         continue
     }
 
 
     # --------------------------------------------------------
-    # Build Artifactory destination URL
+    # Construct artifact path
     # --------------------------------------------------------
 
-    $artifactPath = "$SCOUT_REPO/$targetRoot/$relativePath"
-
-    $encodedArtifactPath = ConvertTo-ArtifactoryPath `
-        -Path $artifactPath
-
-    $uploadUrl = "$JFROG_URL/$encodedArtifactPath"
-
-
-    Write-Host "UPLOAD  $relativePath"
+    $ArtifactPath = "$ScoutRepository/$TargetRoot/$RelativePath"
 
 
     # --------------------------------------------------------
-    # Upload file
+    # Encode each individual path component.
+    #
+    # This safely handles:
+    #
+    # spaces
+    # parentheses
+    # special characters
+    # --------------------------------------------------------
+
+    $PathParts = $ArtifactPath -split '/'
+
+    $EncodedParts = @()
+
+
+    foreach ($Part in $PathParts) {
+
+        if ($Part.Length -gt 0) {
+
+            $EncodedPart = [System.Uri]::EscapeDataString($Part)
+
+            $EncodedParts += $EncodedPart
+        }
+    }
+
+
+    $EncodedArtifactPath = $EncodedParts -join '/'
+
+
+    # --------------------------------------------------------
+    # Build complete upload URL
+    # --------------------------------------------------------
+
+    $UploadUrl = "$JFrogUrl/$EncodedArtifactPath"
+
+
+    Write-Host "UPLOAD  $RelativePath"
+
+
+    # --------------------------------------------------------
+    # Upload artifact
     # --------------------------------------------------------
 
     try {
+
         Invoke-RestMethod `
-            -Uri $uploadUrl `
+            -Uri $UploadUrl `
             -Method Put `
-            -Headers $headers `
-            -InFile $file.FullName `
+            -Headers $Headers `
+            -InFile $File.FullName `
             -ContentType "application/octet-stream" `
             -ErrorAction Stop |
             Out-Null
 
-        Write-Host "SUCCESS $relativePath" `
-            -ForegroundColor Green
 
-        $uploaded++
+        Write-Host "SUCCESS $RelativePath" -ForegroundColor Green
+
+
+        $UploadedCount = $UploadedCount + 1
     }
+
     catch {
-        $failed++
-        $failedFiles += $relativePath
 
-        Write-Host "FAILED  $relativePath" `
-            -ForegroundColor Red
+        $FailedCount = $FailedCount + 1
 
-        $errorMessage = $_.Exception.Message
+        $FailedFiles += $RelativePath
 
-        if (
-            $null -ne $_.ErrorDetails -and
-            -not :IsNullOrWhiteSpace($_.ErrorDetails.Message)
-        ) {
-            $errorMessage = $_.ErrorDetails.Message
+
+        Write-Host "FAILED  $RelativePath" -ForegroundColor Red
+
+
+        $ErrorMessage = $_.Exception.Message
+
+
+        if ($null -ne $_.ErrorDetails) {
+
+            if ($null -ne $_.ErrorDetails.Message) {
+
+                if ($_.ErrorDetails.Message.Length -gt 0) {
+
+                    $ErrorMessage = $_.ErrorDetails.Message
+                }
+            }
         }
 
-        Write-Host $errorMessage `
-            -ForegroundColor Red
+
+        Write-Host $ErrorMessage -ForegroundColor Red
     }
 }
 
 
 # ============================================================
-# UPLOAD SUMMARY
+# SUMMARY
 # ============================================================
 
 Write-Host ""
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host "UPLOAD SUMMARY"
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host ""
 
-Write-Host "Uploaded : $uploaded" `
-    -ForegroundColor Green
+Write-Host "Uploaded : $UploadedCount" -ForegroundColor Green
 
-Write-Host "Skipped  : $skipped" `
-    -ForegroundColor Yellow
+Write-Host "Skipped  : $SkippedCount" -ForegroundColor Yellow
 
-if ($failed -eq 0) {
-    Write-Host "Failed   : 0" `
-        -ForegroundColor Green
+
+if ($FailedCount -eq 0) {
+
+    Write-Host "Failed   : 0" -ForegroundColor Green
 }
+
 else {
-    Write-Host "Failed   : $failed" `
-        -ForegroundColor Red
+
+    Write-Host "Failed   : $FailedCount" -ForegroundColor Red
 }
+
 
 Write-Host ""
 Write-Host "Scout Location:"
-Write-Host "$SCOUT_REPO/$targetRoot"
+Write-Host "$ScoutRepository/$TargetRoot"
+
 Write-Host ""
-Write-Host "============================================"
+Write-Host "=============================================="
 
 
 # ============================================================
-# FAIL IF ANY UPLOAD FAILED
+# HANDLE FAILURES
 # ============================================================
 
-if ($failed -gt 0) {
+if ($FailedCount -gt 0) {
 
     Write-Host ""
-    Write-Host "FAILED FILES:" `
-        -ForegroundColor Red
+    Write-Host "FAILED FILES:" -ForegroundColor Red
 
-    foreach ($failedFile in $failedFiles) {
-        Write-Host "  $failedFile" `
-            -ForegroundColor Red
+
+    foreach ($FailedFile in $FailedFiles) {
+
+        Write-Host "  $FailedFile" -ForegroundColor Red
     }
 
+
     Write-Host ""
 
-    throw "$failed file(s) failed to upload."
+
+    throw "$FailedCount file(s) failed to upload."
 }
 
-if ($uploaded -eq 0) {
+
+# ============================================================
+# MAKE SURE SOMETHING WAS ACTUALLY UPLOADED
+# ============================================================
+
+if ($UploadedCount -eq 0) {
+
     throw "No regular artifacts were uploaded."
 }
 
@@ -412,17 +467,20 @@ if ($uploaded -eq 0) {
 # ============================================================
 
 Write-Host ""
-Write-Host "============================================"
+Write-Host "=============================================="
 Write-Host "HOTFIX UPLOAD SUCCESSFUL"
-Write-Host "============================================"
+Write-Host "=============================================="
+
 Write-Host ""
 Write-Host "Scout Clone:"
-Write-Host "$SCOUT_REPO/$targetRoot"
+Write-Host "$ScoutRepository/$TargetRoot"
+
 Write-Host ""
 Write-Host "Promotion Root:"
-Write-Host "$promotionPath"
+Write-Host "$PromotionPath"
+
 Write-Host ""
-Write-Host "============================================" `
-    -ForegroundColor Green
+Write-Host "==============================================" -ForegroundColor Green
+
 
 exit 0

@@ -1,9 +1,9 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 title Scout Hotfix Upload
-
 cls
+
 echo.
 echo ==============================================
 echo          SCOUT HOTFIX UPLOAD
@@ -12,22 +12,33 @@ echo.
 
 REM ============================================================
 REM LOCAL FOLDER
+REM Supports spaces and parentheses, for example:
+REM C:\Users\User\Downloads\softwareartifact (1)
 REM ============================================================
 
 set "LOCAL_FOLDER="
 set /p "LOCAL_FOLDER=Enter Local Folder Path: "
 
-if "%LOCAL_FOLDER%"=="" (
+if not defined LOCAL_FOLDER (
     echo.
     echo ERROR: Local Folder Path is required.
+    echo.
     pause
     exit /b 1
 )
 
-if not exist "%LOCAL_FOLDER%\" (
+REM Remove surrounding quotation marks if the user pasted them.
+set "LOCAL_FOLDER=!LOCAL_FOLDER:"=!"
+
+REM Validate using PowerShell instead of CMD IF EXIST.
+powershell.exe -NoLogo -NoProfile -Command ^
+    "if (Test-Path -LiteralPath $env:LOCAL_FOLDER -PathType Container) { exit 0 } else { exit 1 }"
+
+if errorlevel 1 (
     echo.
-    echo ERROR: Folder does not exist:
-    echo %LOCAL_FOLDER%
+    echo ERROR: Folder does not exist or cannot be accessed:
+    echo !LOCAL_FOLDER!
+    echo.
     pause
     exit /b 1
 )
@@ -38,12 +49,14 @@ REM CALENDAR WEEK
 REM ============================================================
 
 echo.
-set "CW_PATH="
-set /p "CW_PATH=Enter CW Path (example CW11): "
 
-if "%CW_PATH%"=="" (
+set "CW_PATH="
+set /p "CW_PATH=Enter CW Path (example CW11 or 11): "
+
+if not defined CW_PATH (
     echo.
     echo ERROR: CW Path is required.
+    echo.
     pause
     exit /b 1
 )
@@ -54,40 +67,26 @@ REM HOTFIX NAME
 REM ============================================================
 
 echo.
-set "HF_NAME="
-set /p "HF_NAME=Enter HF Name (example HF01): "
 
-if "%HF_NAME%"=="" (
+set "HF_NAME="
+set /p "HF_NAME=Enter HF Name (example HF01 or 01): "
+
+if not defined HF_NAME (
     echo.
     echo ERROR: HF Name is required.
+    echo.
     pause
     exit /b 1
 )
 
 
 REM ============================================================
-REM NORMALIZE CW AND HF TO UPPERCASE
-REM ============================================================
-
-for /f "delims=" %%A in ('powershell -NoProfile -Command "'%CW_PATH%'.Trim().ToUpperInvariant()"') do set "CW_PATH=%%A"
-
-for /f "delims=" %%A in ('powershell -NoProfile -Command "'%HF_NAME%'.Trim().ToUpperInvariant()"') do set "HF_NAME=%%A"
-
-
-REM ============================================================
-REM GET LOCAL FOLDER NAME
-REM ============================================================
-
-for %%F in ("%LOCAL_FOLDER%") do set "FOLDER_NAME=%%~nxF"
-
-
-REM ============================================================
-REM FIND POWERSHELL SCRIPT
+REM LOCATE POWERSHELL SCRIPT
 REM ============================================================
 
 set "PS_SCRIPT=%~dp0upload-hotfix.ps1"
 
-if not exist "%PS_SCRIPT%" (
+if not exist "!PS_SCRIPT!" (
     echo.
     echo ==============================================
     echo ERROR
@@ -95,8 +94,8 @@ if not exist "%PS_SCRIPT%" (
     echo.
     echo upload-hotfix.ps1 was not found.
     echo.
-    echo Expected:
-    echo %PS_SCRIPT%
+    echo Expected location:
+    echo !PS_SCRIPT!
     echo.
     pause
     exit /b 1
@@ -104,7 +103,32 @@ if not exist "%PS_SCRIPT%" (
 
 
 REM ============================================================
-REM DISPLAY NORMALIZED CONFIGURATION
+REM DETERMINE LOCAL FOLDER NAME
+REM Uses PowerShell to handle parentheses and spaces safely.
+REM ============================================================
+
+set "FOLDER_NAME="
+
+for /f "usebackq delims=" %%F in (`powershell.exe -NoLogo -NoProfile -Command "(Get-Item -LiteralPath $env:LOCAL_FOLDER).Name"`) do (
+    set "FOLDER_NAME=%%F"
+)
+
+if not defined FOLDER_NAME (
+    echo.
+    echo ERROR: Could not determine the local folder name.
+    echo.
+    pause
+    exit /b 1
+)
+
+
+REM ============================================================
+REM SHOW CONFIGURATION
+REM CW and HF are normalized by upload-hotfix.ps1:
+REM cw11 becomes CW11
+REM 11 becomes CW11
+REM hf01 becomes HF01
+REM 01 becomes HF01
 REM ============================================================
 
 echo.
@@ -113,26 +137,26 @@ echo          UPLOAD CONFIGURATION
 echo ==============================================
 echo.
 echo Local Folder:
-echo %LOCAL_FOLDER%
+echo !LOCAL_FOLDER!
 echo.
-echo Local Folder Name:
-echo %FOLDER_NAME%
+echo Folder Name:
+echo !FOLDER_NAME!
 echo.
-echo Calendar Week:
-echo %CW_PATH%
+echo CW Input:
+echo !CW_PATH!
 echo.
-echo Hotfix:
-echo %HF_NAME%
+echo HF Input:
+echo !HF_NAME!
 echo.
-echo Scout Target:
-echo Official_Release/%CW_PATH%/Hotfixes/%HF_NAME%/%FOLDER_NAME%
+echo Expected target:
+echo Official_Release/[normalized CW]/Hotfixes/[normalized HF]/!FOLDER_NAME!
 echo.
 echo ==============================================
 echo.
 
 
 REM ============================================================
-REM CONFIRM
+REM CONFIRMATION
 REM ============================================================
 
 choice /C YN /M "Continue with upload"
@@ -151,19 +175,19 @@ REM RUN POWERSHELL UPLOADER
 REM ============================================================
 
 echo.
-echo Starting upload...
+echo Starting PowerShell uploader...
 echo.
 
 pwsh.exe ^
     -NoLogo ^
     -NoProfile ^
     -ExecutionPolicy Bypass ^
-    -File "%PS_SCRIPT%" ^
-    -LocalFolder "%LOCAL_FOLDER%" ^
-    -CWPath "%CW_PATH%" ^
-    -HFName "%HF_NAME%"
+    -File "!PS_SCRIPT!" ^
+    -LocalFolder "!LOCAL_FOLDER!" ^
+    -CWPath "!CW_PATH!" ^
+    -HFName "!HF_NAME!"
 
-set "EXIT_CODE=%ERRORLEVEL%"
+set "EXIT_CODE=!ERRORLEVEL!"
 
 
 REM ============================================================
@@ -172,31 +196,30 @@ REM ============================================================
 
 echo.
 
-if not "%EXIT_CODE%"=="0" (
+if not "!EXIT_CODE!"=="0" (
+    echo.
     echo ==============================================
     echo              UPLOAD FAILED
     echo ==============================================
     echo.
-    echo Exit Code: %EXIT_CODE%
+    echo Exit Code: !EXIT_CODE!
     echo.
-    echo Check the error above for details.
+    echo Review the PowerShell error displayed above.
     echo.
     pause
-    exit /b %EXIT_CODE%
+    exit /b !EXIT_CODE!
 )
 
-
+echo.
 echo ==============================================
 echo         HOTFIX UPLOAD SUCCESSFUL
 echo ==============================================
 echo.
-echo Scout Location:
-echo.
-echo Official_Release/%CW_PATH%/Hotfixes/%HF_NAME%/%FOLDER_NAME%
+echo Uploaded folder:
+echo !FOLDER_NAME!
 echo.
 echo ==============================================
 echo.
 
 pause
-
 exit /b 0
