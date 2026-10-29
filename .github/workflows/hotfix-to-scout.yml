@@ -1,425 +1,487 @@
-name: Hotfix to Scout Clone
+name: Hotfix SharePoint to Scout Clone
 
 on:
   workflow_dispatch:
     inputs:
-      staging_asset:
-        description: "Temporary private GitHub Release asset"
+
+      sharepoint_sync_path:
+        description: "Local synced SharePoint path on the runner"
         required: true
         type: string
 
-      original_folder_name:
-        description: "Original local root folder name"
+      hotfix_folder:
+        description: "Folder name inside the SharePoint location"
         required: true
         type: string
 
       cw_path:
-        description: "Existing CW folder name, for example CW11"
+        description: "Calendar Week folder, for example CW11"
         required: true
         type: string
 
       hf_name:
-        description: "Hotfix folder name, for example HF01"
+        description: "Hotfix name, for example HF01"
         required: true
         type: string
 
-permissions:
-  contents: write
 
 jobs:
+
   upload-hotfix:
-    name: Upload Hotfix to Scout Clone
-    runs-on: ubuntu-latest
+
+    name: Upload SharePoint Hotfix to Scout
+
+    runs-on: self-hosted
 
     env:
-      STAGING_TAG: hotfix-staging
       SCOUT_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
 
     steps:
+
       # ============================================================
-      # 1. Validate inputs
+      # 1. Resolve inputs
       # ============================================================
 
-      - name: Validate inputs
-        id: inputs
-        shell: bash
+      - name: Resolve Hotfix paths
+        id: paths
+        shell: pwsh
         env:
-          STAGING_ASSET: ${{ inputs.staging_asset }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
+          SHAREPOINT_ROOT: ${{ inputs.sharepoint_sync_path }}
+          HOTFIX_FOLDER: ${{ inputs.hotfix_folder }}
           CW_PATH: ${{ inputs.cw_path }}
           HF_NAME: ${{ inputs.hf_name }}
+
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
 
-          if [[ -z "$STAGING_ASSET" ]]; then
-            echo "staging_asset cannot be empty."
-            exit 1
-          fi
+          $sharePointRoot = "$env:SHAREPOINT_ROOT".Trim().TrimEnd('\', '/')
+          $folderName     = "$env:HOTFIX_FOLDER".Trim().Trim('\', '/')
+          $cwPath         = "$env:CW_PATH".Trim().Trim('\', '/')
+          $hfName         = "$env:HF_NAME".Trim().Trim('\', '/')
 
-          if [[ -z "$ORIGINAL_FOLDER_NAME" ]]; then
-            echo "original_folder_name cannot be empty."
-            exit 1
-          fi
+          if ([string]::IsNullOrWhiteSpace($sharePointRoot)) {
+              throw "SharePoint Sync Path cannot be empty."
+          }
 
-          if [[ ! "$CW_PATH" =~ ^CW.+$ ]]; then
-            echo "CW path must start with CW. Received: $CW_PATH"
-            exit 1
-          fi
+          if ([string]::IsNullOrWhiteSpace($folderName)) {
+              throw "Hotfix Folder cannot be empty."
+          }
 
-          if [[ "$CW_PATH" == *"/"* || "$CW_PATH" == *"\\"* ]]; then
-            echo "CW path must be one folder name."
-            exit 1
-          fi
+          if ($folderName.Contains('\') -or $folderName.Contains('/')) {
+              throw "Hotfix Folder must contain only the folder name."
+          }
 
-          if [[ ! "$HF_NAME" =~ ^HF.+$ ]]; then
-            echo "HF name must start with HF. Received: $HF_NAME"
-            exit 1
-          fi
+          if ([string]::IsNullOrWhiteSpace($cwPath)) {
+              throw "CW Path cannot be empty."
+          }
 
-          if [[ "$HF_NAME" == *"/"* || "$HF_NAME" == *"\\"* ]]; then
-            echo "HF name must be one folder name."
-            exit 1
-          fi
+          if ($cwPath -notmatch '^CW.+$') {
+              throw "CW Path must start with CW. Received: $cwPath"
+          }
 
-          promotion_path="Official_Release/$CW_PATH/Hotfixes/$HF_NAME"
+          if ($cwPath.Contains('\') -or $cwPath.Contains('/')) {
+              throw "CW Path must be one folder name."
+          }
 
-          echo "promotion_path=$promotion_path" >> "$GITHUB_OUTPUT"
+          if ([string]::IsNullOrWhiteSpace($hfName)) {
+              throw "HF Name cannot be empty."
+          }
 
-          echo "============================================"
-          echo "HOTFIX INPUTS"
-          echo "============================================"
-          echo "Asset       : $STAGING_ASSET"
-          echo "Root Folder : $ORIGINAL_FOLDER_NAME"
-          echo "CW Path     : $CW_PATH"
-          echo "HF Name     : $HF_NAME"
-          echo "Target Root : $promotion_path"
-          echo "============================================"
+          if ($hfName -notmatch '^HF.+$') {
+              throw "HF Name must start with HF. Received: $hfName"
+          }
+
+          if ($hfName.Contains('\') -or $hfName.Contains('/')) {
+              throw "HF Name must be one folder name."
+          }
+
+          # --------------------------------------------------------
+          # Construct local SharePoint-synced source folder
+          # --------------------------------------------------------
+
+          $localFolder = Join-Path `
+              $sharePointRoot `
+              $folderName
+
+          Write-Host ""
+          Write-Host "Runner computer:"
+          Write-Host "$env:COMPUTERNAME"
+
+          Write-Host ""
+          Write-Host "Runner user:"
+          Write-Host "$env:USERNAME"
+
+          Write-Host ""
+          Write-Host "SharePoint root:"
+          Write-Host "$sharePointRoot"
+
+          Write-Host ""
+          Write-Host "Requested Hotfix folder:"
+          Write-Host "$folderName"
+
+          Write-Host ""
+          Write-Host "Expected local source:"
+          Write-Host "$localFolder"
+
+
+          # --------------------------------------------------------
+          # Validate synced SharePoint location
+          # --------------------------------------------------------
+
+          if (-not (Test-Path -LiteralPath $sharePointRoot -PathType Container)) {
+
+              throw "SharePoint sync location is not accessible by the runner: $sharePointRoot"
+          }
+
+          if (-not (Test-Path -LiteralPath $localFolder -PathType Container)) {
+
+              throw "Hotfix folder was not found under the SharePoint sync location: $localFolder"
+          }
+
+
+          # --------------------------------------------------------
+          # Count files
+          # --------------------------------------------------------
+
+          $files = @(
+              Get-ChildItem `
+                  -LiteralPath $localFolder `
+                  -File `
+                  -Recurse
+          )
+
+          if ($files.Count -eq 0) {
+              throw "Hotfix folder contains no files: $localFolder"
+          }
+
+
+          # --------------------------------------------------------
+          # Construct Scout paths
+          # --------------------------------------------------------
+
+          $promotionPath = "Official_Release/$cwPath/Hotfixes/$hfName"
+
+          $targetPath = "$promotionPath/$folderName"
+
+
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "SHAREPOINT HOTFIX -> SCOUT"
+          Write-Host "============================================"
+
+          Write-Host ""
+          Write-Host "Source:"
+          Write-Host "$localFolder"
+
+          Write-Host ""
+          Write-Host "Files:"
+          Write-Host "$($files.Count)"
+
+          Write-Host ""
+          Write-Host "Calendar Week:"
+          Write-Host "$cwPath"
+
+          Write-Host ""
+          Write-Host "Hotfix:"
+          Write-Host "$hfName"
+
+          Write-Host ""
+          Write-Host "Scout Destination:"
+          Write-Host "$env:SCOUT_REPO/$targetPath"
+
+          Write-Host ""
+          Write-Host "============================================"
+
+
+          # --------------------------------------------------------
+          # GitHub step outputs
+          # --------------------------------------------------------
+
+          "local_folder=$localFolder" >> $env:GITHUB_OUTPUT
+          "folder_name=$folderName" >> $env:GITHUB_OUTPUT
+          "cw_path=$cwPath" >> $env:GITHUB_OUTPUT
+          "hf_name=$hfName" >> $env:GITHUB_OUTPUT
+          "promotion_path=$promotionPath" >> $env:GITHUB_OUTPUT
+          "target_path=$targetPath" >> $env:GITHUB_OUTPUT
+
 
       # ============================================================
-      # 2. Download temporary ZIP from private draft release
-      # ============================================================
-
-      - name: Download staged Hotfix
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STAGING_ASSET: ${{ inputs.staging_asset }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$RUNNER_TEMP/hotfix-download"
-
-          gh release download "$STAGING_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$STAGING_ASSET" \
-            --dir "$RUNNER_TEMP/hotfix-download"
-
-          zip_path="$RUNNER_TEMP/hotfix-download/$STAGING_ASSET"
-
-          if [[ ! -f "$zip_path" ]]; then
-            echo "Staged ZIP was not downloaded: $zip_path"
-            exit 1
-          fi
-
-          echo "Downloaded: $zip_path"
-
-      # ============================================================
-      # 3. Extract ZIP
-      # ============================================================
-
-      - name: Extract Hotfix package
-        id: extract
-        shell: bash
-        env:
-          STAGING_ASSET: ${{ inputs.staging_asset }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-        run: |
-          set -euo pipefail
-
-          zip_path="$RUNNER_TEMP/hotfix-download/$STAGING_ASSET"
-          extract_root="$RUNNER_TEMP/hotfix-extracted"
-
-          mkdir -p "$extract_root"
-          unzip -q "$zip_path" -d "$extract_root"
-
-          source_folder="$extract_root/$ORIGINAL_FOLDER_NAME"
-
-          if [[ ! -d "$source_folder" ]]; then
-            echo "Expected extracted root folder was not found:"
-            echo "$source_folder"
-            echo "Extracted contents:"
-            find "$extract_root" -maxdepth 3 -print
-            exit 1
-          fi
-
-          if ! find "$source_folder" -type f -print -quit | grep -q .; then
-            echo "Extracted folder contains no files."
-            exit 1
-          fi
-
-          echo "source_folder=$source_folder" >> "$GITHUB_OUTPUT"
-
-          echo "Extracted Hotfix root:"
-          echo "$source_folder"
-
-      # ============================================================
-      # 4. Setup JFrog CLI
+      # 2. Setup JFrog CLI
       # ============================================================
 
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
 
+
       # ============================================================
-      # 5. Configure Scout JFrog
+      # 3. Configure Scout JFrog
       # ============================================================
 
       - name: Configure Scout JFrog
-        shell: bash
+        shell: pwsh
         env:
           JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
           JFROG_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
 
-          if [[ -z "$JFROG_URL" ]]; then
-            echo "SCOUT_JFROG_URL secret is empty."
-            exit 1
-          fi
-
-          if [[ -z "$JFROG_TOKEN" ]]; then
-            echo "SCOUT_JFROG_ACCESS_TOKEN secret is empty."
-            exit 1
-          fi
-
-          if [[ -z "$SCOUT_REPO" ]]; then
-            echo "SCOUT_CLONE_REPO secret is empty."
-            exit 1
-          fi
-
-          jf c remove scout-hotfix --quiet 2>/dev/null || true
-
-          jf c add scout-hotfix \
-            --url="$JFROG_URL" \
-            --access-token="$JFROG_TOKEN" \
-            --interactive=false
-
-          jf rt ping --server-id=scout-hotfix
-
-      # ============================================================
-      # 6. Create upload spec
-      #
-      # Existing HF content is not deleted.
-      # ============================================================
-
-      - name: Create upload spec
-        id: upload_spec
-        shell: bash
-        env:
-          SOURCE_FOLDER: ${{ steps.extract.outputs.source_folder }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-          PROMOTION_PATH: ${{ steps.inputs.outputs.promotion_path }}
-        run: |
-          set -euo pipefail
-
-          spec_path="$RUNNER_TEMP/hotfix-upload-spec.json"
-
-          python3 - "$spec_path" <<'PY'
-          import json
-          import os
-          import sys
-
-          spec_path = sys.argv[1]
-
-          source_folder = os.environ["SOURCE_FOLDER"].rstrip("/")
-          root_name = os.environ["ORIGINAL_FOLDER_NAME"]
-          repo = os.environ["SCOUT_REPO"]
-          promotion_path = os.environ["PROMOTION_PATH"]
-
-          spec = {
-              "files": [
-                  {
-                      "pattern": f"{source_folder}/(*)",
-                      "target": (
-                          f"{repo}/{promotion_path}/"
-                          f"{root_name}/{{1}}"
-                      ),
-                      "recursive": "true",
-                      "flat": "true"
-                  }
-              ]
+          if ([string]::IsNullOrWhiteSpace($env:JFROG_URL)) {
+              throw "SCOUT_JFROG_URL secret is empty."
           }
 
-          with open(spec_path, "w", encoding="utf-8") as handle:
-              json.dump(spec, handle, indent=2)
-          PY
+          if ([string]::IsNullOrWhiteSpace($env:JFROG_TOKEN)) {
+              throw "SCOUT_JFROG_ACCESS_TOKEN secret is empty."
+          }
 
-          cat "$spec_path"
-          echo "spec_path=$spec_path" >> "$GITHUB_OUTPUT"
+          if ([string]::IsNullOrWhiteSpace($env:SCOUT_REPO)) {
+              throw "SCOUT_CLONE_REPO secret is empty."
+          }
+
+          Write-Host ""
+          Write-Host "Configuring Scout JFrog..."
+
+          & jf c remove scout-hotfix --quiet 2>$null
+          $global:LASTEXITCODE = 0
+
+          & jf c add scout-hotfix `
+              --url="$env:JFROG_URL" `
+              --access-token="$env:JFROG_TOKEN" `
+              --interactive=false
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to configure Scout JFrog."
+          }
+
+          Write-Host ""
+          Write-Host "Testing Scout JFrog..."
+
+          & jf rt ping `
+              --server-id=scout-hotfix
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Scout JFrog connection failed."
+          }
+
+          Write-Host ""
+          Write-Host "Scout JFrog connection successful." `
+              -ForegroundColor Green
+
 
       # ============================================================
-      # 7. Upload complete folder to Scout Clone
+      # 4. Create JFrog upload spec
+      #
+      # Example:
+      #
+      # SharePoint synced:
+      # Hotfixes-upload\TSG_BFS\...
+      #
+      # Inputs:
+      # CW29
+      # HF03
+      #
+      # Scout:
+      # Official_Release/
+      #   CW29/
+      #     Hotfixes/
+      #       HF03/
+      #         TSG_BFS/
+      #           ...
+      #
+      # Existing HF03 is NOT deleted.
+      # ============================================================
+
+      - name: Create Hotfix upload spec
+        id: upload_spec
+        shell: pwsh
+        env:
+          LOCAL_FOLDER: ${{ steps.paths.outputs.local_folder }}
+          FOLDER_NAME: ${{ steps.paths.outputs.folder_name }}
+          PROMOTION_PATH: ${{ steps.paths.outputs.promotion_path }}
+
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $localFolder = $env:LOCAL_FOLDER.Replace('\', '/').TrimEnd('/')
+
+          $sourcePattern = "$localFolder/(*)"
+
+          $targetPattern = (
+              "$env:SCOUT_REPO/" +
+              "$env:PROMOTION_PATH/" +
+              "$env:FOLDER_NAME/{1}"
+          )
+
+          $specPath = Join-Path `
+              $env:RUNNER_TEMP `
+              "hotfix-sharepoint-upload.json"
+
+          $spec = [ordered]@{
+              files = @(
+                  [ordered]@{
+                      pattern   = $sourcePattern
+                      target    = $targetPattern
+                      recursive = "true"
+                      flat      = "true"
+                  }
+              )
+          }
+
+          $specJson = $spec | ConvertTo-Json -Depth 10
+
+          Set-Content `
+              -LiteralPath $specPath `
+              -Value $specJson `
+              -Encoding UTF8
+
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "JFROG UPLOAD SPEC"
+          Write-Host "============================================"
+
+          Write-Host ""
+          Write-Host "Source Pattern:"
+          Write-Host "$sourcePattern"
+
+          Write-Host ""
+          Write-Host "Target Pattern:"
+          Write-Host "$targetPattern"
+
+          Write-Host ""
+          Write-Host "============================================"
+
+          "spec_path=$specPath" >> $env:GITHUB_OUTPUT
+
+
+      # ============================================================
+      # 5. Upload complete folder to Scout
+      #
+      # Existing HF folder is not deleted.
+      #
+      # Existing:
+      # HF03/ECU_A
+      # HF03/ECU_B
+      #
+      # Upload TSG_BFS:
+      #
+      # HF03/
+      #   ECU_A/
+      #   ECU_B/
+      #   TSG_BFS/
+      #
       # ============================================================
 
       - name: Upload Hotfix to Scout Clone
-        shell: bash
+        shell: pwsh
         env:
           SPEC_PATH: ${{ steps.upload_spec.outputs.spec_path }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-          PROMOTION_PATH: ${{ steps.inputs.outputs.promotion_path }}
+          TARGET_PATH: ${{ steps.paths.outputs.target_path }}
+
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
 
-          echo "============================================"
-          echo "UPLOADING HOTFIX TO SCOUT CLONE"
-          echo "============================================"
-          echo "Destination:"
-          echo "$SCOUT_REPO/$PROMOTION_PATH/$ORIGINAL_FOLDER_NAME"
-          echo "============================================"
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "UPLOADING HOTFIX TO SCOUT"
+          Write-Host "============================================"
 
-          jf rt upload \
-            --spec="$SPEC_PATH" \
-            --server-id=scout-hotfix \
-            --fail-no-op
+          Write-Host ""
+          Write-Host "Destination:"
+          Write-Host "$env:SCOUT_REPO/$env:TARGET_PATH"
+
+          Write-Host ""
+
+          & jf rt upload `
+              --spec="$env:SPEC_PATH" `
+              --server-id=scout-hotfix `
+              --fail-no-op
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Hotfix upload to Scout failed."
+          }
+
+          Write-Host ""
+          Write-Host "Hotfix upload completed successfully." `
+              -ForegroundColor Green
+
 
       # ============================================================
-      # 8. Verify Scout upload
+      # 6. Verify Scout
       # ============================================================
 
-      - name: Verify Scout Clone Hotfix
-        shell: bash
+      - name: Verify Scout Hotfix
+        shell: pwsh
         env:
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-          PROMOTION_PATH: ${{ steps.inputs.outputs.promotion_path }}
+          TARGET_PATH: ${{ steps.paths.outputs.target_path }}
+
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
 
-          target_pattern="$SCOUT_REPO/$PROMOTION_PATH/$ORIGINAL_FOLDER_NAME/*"
+          $targetPattern =
+              "$env:SCOUT_REPO/$env:TARGET_PATH/*"
 
-          jf rt search \
-            "$target_pattern" \
-            --server-id=scout-hotfix \
-            --recursive=true \
-            --limit=1 \
-            --fail-no-op
+          Write-Host ""
+          Write-Host "Verifying Scout:"
+          Write-Host "$targetPattern"
 
-          echo "Hotfix verified in Scout Clone."
+          Write-Host ""
 
-      # ============================================================
-      # 9. Trigger existing Power Automate exactly once
-      # ============================================================
+          & jf rt search `
+              "$targetPattern" `
+              --server-id=scout-hotfix `
+              --recursive=true `
+              --limit=1 `
+              --fail-no-op
 
-      - name: Trigger existing FVP approval flow
-        shell: bash
-        env:
-          APPROVAL_WEBHOOK_URL: ${{ secrets.FVP_APPROVAL_WEBHOOK_URL }}
-          PROMOTION_PATH: ${{ steps.inputs.outputs.promotion_path }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-          CW_PATH: ${{ inputs.cw_path }}
-          HF_NAME: ${{ inputs.hf_name }}
-        run: |
-          set -euo pipefail
+          if ($LASTEXITCODE -ne 0) {
+              throw "Scout Hotfix verification failed."
+          }
 
-          if [[ -z "$APPROVAL_WEBHOOK_URL" ]]; then
-            echo "FVP_APPROVAL_WEBHOOK_URL secret is empty."
-            exit 1
-          fi
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "HOTFIX UPLOAD SUCCESSFUL"
+          Write-Host "============================================"
 
-          payload=$(
-            jq -n \
-              --arg promotion_path "$PROMOTION_PATH" \
-              --arg cw "$CW_PATH" \
-              --arg hf_name "$HF_NAME" \
-              --arg folder "$ORIGINAL_FOLDER_NAME" \
-              --arg actor "$GITHUB_ACTOR" \
-              --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              '{
-                promotion_path: $promotion_path,
-                build_type: "official",
-                promotion_type: "hotfix",
-                cw: $cw,
-                hf_name: $hf_name,
-                uploaded_folder: $folder,
-                requested_by: $actor,
-                source: "Hotfix to Scout Clone",
-                github_run_url: $run_url
-              }'
-          )
+          Write-Host ""
+          Write-Host "Scout Location:"
+          Write-Host "$env:SCOUT_REPO/$env:TARGET_PATH"
 
-          curl \
-            --fail \
-            --show-error \
-            --silent \
-            --request POST \
-            --header "Content-Type: application/json" \
-            --data "$payload" \
-            "$APPROVAL_WEBHOOK_URL"
+          Write-Host ""
+          Write-Host "Promotion Root:"
+          Write-Host "${{ steps.paths.outputs.promotion_path }}"
 
-          echo
-          echo "Power Automate triggered successfully."
-          echo "One approval has been requested."
+          Write-Host ""
+          Write-Host "============================================" `
+              -ForegroundColor Green
+
 
       # ============================================================
-      # 10. Delete temporary GitHub staging ZIP
-      #
-      # Only after Scout upload and Power Automate trigger succeed.
-      # ============================================================
-
-      - name: Delete temporary staging asset
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STAGING_ASSET: ${{ inputs.staging_asset }}
-        run: |
-          set -euo pipefail
-
-          asset_id=$(
-            gh api \
-              "repos/$GITHUB_REPOSITORY/releases/tags/$STAGING_TAG" \
-              --jq ".assets[] | select(.name == \"$STAGING_ASSET\") | .id"
-          )
-
-          if [[ -n "$asset_id" ]]; then
-            gh api \
-              --method DELETE \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-
-            echo "Temporary staging asset deleted."
-          else
-            echo "Temporary staging asset was already absent."
-          fi
-
-      # ============================================================
-      # 11. Summary
-      # ============================================================
-
-      - name: Summary
-        shell: bash
-        env:
-          PROMOTION_PATH: ${{ steps.inputs.outputs.promotion_path }}
-          ORIGINAL_FOLDER_NAME: ${{ inputs.original_folder_name }}
-        run: |
-          set -euo pipefail
-
-          echo "============================================"
-          echo "HOTFIX UPLOAD SUCCESSFUL"
-          echo "============================================"
-          echo "Scout Clone:"
-          echo "$SCOUT_REPO/$PROMOTION_PATH/$ORIGINAL_FOLDER_NAME"
-          echo
-          echo "Power Automate approval root:"
-          echo "$PROMOTION_PATH"
-          echo "============================================"
-
-      # ============================================================
-      # 12. Cleanup JFrog configuration
+      # 7. Cleanup
       # ============================================================
 
       - name: Cleanup
         if: always()
         continue-on-error: true
-        shell: bash
+        shell: pwsh
+
         run: |
-          jf c remove scout-hotfix --quiet 2>/dev/null || true
-          rm -rf "$RUNNER_TEMP/hotfix-download"
-          rm -rf "$RUNNER_TEMP/hotfix-extracted"
-          rm -f "$RUNNER_TEMP/hotfix-upload-spec.json"
+          $ErrorActionPreference = 'Continue'
+
+          & jf c remove scout-hotfix --quiet 2>$null
+          $global:LASTEXITCODE = 0
+
+          $specPath = Join-Path `
+              $env:RUNNER_TEMP `
+              "hotfix-sharepoint-upload.json"
+
+          if (Test-Path -LiteralPath $specPath) {
+
+              Remove-Item `
+                  -LiteralPath $specPath `
+                  -Force `
+                  -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "Cleanup completed."
+
+          exit 0
