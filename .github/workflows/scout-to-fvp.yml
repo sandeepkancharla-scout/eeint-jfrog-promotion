@@ -11,13 +11,13 @@ jobs:
     runs-on: self-hosted
 
     env:
-      SOURCE_REPO: rvtm-vw-rvt-scout-build-binaries-clone
-      TARGET_REPO: eeint2-Scout-FVP-Release
+      SOURCE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+      TARGET_REPO: ${{ secrets.SCOUT_FVP_REPO }}
 
     steps:
 
       # ============================================================
-      # 1. Read folder path sent by Power Automate
+      # 1. Resolve folder path received from Power Automate
       # ============================================================
 
       - name: Resolve folder path
@@ -34,16 +34,25 @@ jobs:
               throw "Power Automate did not provide client_payload.folder_path."
           }
 
-          # Normalize slashes
+          # Normalize path separators
           $folderPath = $folderPath.Replace('\', '/').Trim('/')
 
           # Power Automate may send a complete Artifactory URL.
-          # If so, extract everything after the Scout Clone repository name.
+          # Example:
+          # https://artifactory.sctmtrs.xyz/artifactory/
+          # rvtm-vw-rvt-scout-build-binaries-clone/
+          # Official_Release/CW11/Release
+          #
+          # Extract only the relative path after the Clone repository.
+
           $repoMarker = "$env:SOURCE_REPO/"
 
           if ($folderPath.Contains($repoMarker)) {
+
+              $markerPosition = $folderPath.IndexOf($repoMarker)
+
               $folderPath = $folderPath.Substring(
-                  $folderPath.IndexOf($repoMarker) + $repoMarker.Length
+                  $markerPosition + $repoMarker.Length
               )
           }
 
@@ -55,61 +64,145 @@ jobs:
 
           Write-Host ""
           Write-Host "============================================"
-          Write-Host "Scout Clone -> FVP"
+          Write-Host "SCOUT CLONE -> FVP"
           Write-Host "============================================"
-          Write-Host "Power Automate input:"
+          Write-Host ""
+          Write-Host "Trigger:"
+          Write-Host "${{ github.event_name }}"
+          Write-Host ""
+          Write-Host "Received from Power Automate:"
           Write-Host "$env:INPUT_FOLDER_PATH"
           Write-Host ""
-          Write-Host "Resolved relative path:"
+          Write-Host "Resolved folder path:"
           Write-Host "$folderPath"
+          Write-Host ""
+
+          # --------------------------------------------------------
+          # Allowed FVP paths
+          # --------------------------------------------------------
+
+          $isOfficial = $folderPath -match '^Official_Release/'
+          $isDaily    = $folderPath -match '^Daily_Builds/'
+
+          if (-not $isOfficial -and -not $isDaily) {
+              throw "Unsupported FVP path '$folderPath'. Expected Official_Release/... or Daily_Builds/..."
+          }
+
+          if ($isOfficial) {
+              Write-Host "Promotion category: Official"
+          }
+
+          if ($isDaily) {
+              Write-Host "Promotion category: Daily"
+          }
+
+          Write-Host ""
           Write-Host "============================================"
-
-          # --------------------------------------------------------
-          # FVP accepts Official_Release only.
-          # Daily_Builds must never reach FVP.
-          # --------------------------------------------------------
-
-          if ($folderPath -match '(^|/)Daily_Builds(/|$)') {
-              throw "Daily builds are not allowed to be promoted to FVP."
-          }
-
-          if ($folderPath -notmatch '^Official_Release/') {
-              throw "Only folders under Official_Release can be promoted to FVP. Received: $folderPath"
-          }
 
           "folder_path=$folderPath" >> $env:GITHUB_OUTPUT
 
 
       # ============================================================
-      # 2. Setup JFrog CLI
+      # 2. Install JFrog CLI on the Windows self-hosted runner
       # ============================================================
 
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
-        env:
-          JF_URL: ${{ secrets.TARGET_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.TARGET_ACCESS_TOKEN }}
 
 
       # ============================================================
-      # 3. Verify JFrog connection
+      # 3. Configure Scout JFrog
+      #
+      # Uses existing GitHub secrets:
+      #
+      # SCOUT_JFROG_URL
+      # SCOUT_JFROG_ACCESS_TOKEN
       # ============================================================
 
-      - name: Verify JFrog connection
+      - name: Configure Scout JFrog
         shell: pwsh
+        env:
+          JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
+          JFROG_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Checking Scout JFrog connection..."
+          if ([string]::IsNullOrWhiteSpace($env:JFROG_URL)) {
+              throw "SCOUT_JFROG_URL secret is empty or unavailable."
+          }
 
-          jf rt ping
+          if ([string]::IsNullOrWhiteSpace($env:JFROG_TOKEN)) {
+              throw "SCOUT_JFROG_ACCESS_TOKEN secret is empty or unavailable."
+          }
 
+          Write-Host ""
+          Write-Host "Configuring Scout JFrog..."
+          Write-Host ""
+
+          # Remove old runner configuration if it exists.
+          # Do not fail if it does not exist.
+
+          jf c remove scout-fvp --quiet 2>$null
+
+          $global:LASTEXITCODE = 0
+
+          # Create fresh JFrog configuration
+
+          jf c add scout-fvp `
+              --url="$env:JFROG_URL" `
+              --access-token="$env:JFROG_TOKEN" `
+              --interactive=false
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to configure Scout JFrog."
+          }
+
+          Write-Host ""
+          Write-Host "Testing Scout JFrog connection..."
+          Write-Host ""
+
+          jf rt ping `
+              --server-id=scout-fvp
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Scout JFrog connection failed with exit code $LASTEXITCODE."
+          }
+
+          Write-Host ""
           Write-Host "Scout JFrog connection successful." `
               -ForegroundColor Green
 
 
       # ============================================================
-      # 4. Display exact Clone -> FVP mapping
+      # 4. Validate repository secrets
+      # ============================================================
+
+      - name: Validate Scout repositories
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_REPO)) {
+              throw "SCOUT_CLONE_REPO secret is empty or unavailable."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:TARGET_REPO)) {
+              throw "SCOUT_FVP_REPO secret is empty or unavailable."
+          }
+
+          Write-Host ""
+          Write-Host "Scout repositories"
+          Write-Host "============================================"
+          Write-Host "Clone repository:"
+          Write-Host "$env:SOURCE_REPO"
+          Write-Host ""
+          Write-Host "FVP repository:"
+          Write-Host "$env:TARGET_REPO"
+          Write-Host "============================================"
+
+
+      # ============================================================
+      # 5. Show exact mapping
       # ============================================================
 
       - name: Show promotion mapping
@@ -124,7 +217,7 @@ jobs:
 
           Write-Host ""
           Write-Host "============================================"
-          Write-Host "FVP PROMOTION"
+          Write-Host "FVP PROMOTION MAPPING"
           Write-Host "============================================"
           Write-Host ""
           Write-Host "SOURCE:"
@@ -133,11 +226,12 @@ jobs:
           Write-Host "TARGET:"
           Write-Host "$targetPath"
           Write-Host ""
+          Write-Host "Complete folder hierarchy will be preserved."
           Write-Host "============================================"
 
 
       # ============================================================
-      # 5. Verify the source has artifacts
+      # 6. Verify Scout Clone source exists
       # ============================================================
 
       - name: Verify Scout Clone source
@@ -156,21 +250,26 @@ jobs:
 
           jf rt search `
               "$sourcePattern" `
+              --server-id=scout-fvp `
               --recursive=true `
               --limit=1 `
               --fail-no-op
 
+          if ($LASTEXITCODE -ne 0) {
+              throw "Scout Clone source was not found or contains no artifacts: $env:FOLDER_PATH"
+          }
+
           Write-Host ""
-          Write-Host "Source folder found." `
+          Write-Host "Scout Clone source found." `
               -ForegroundColor Green
 
 
       # ============================================================
-      # 6. Copy COMPLETE folder from Scout Clone to FVP
+      # 7. Copy COMPLETE folder from Scout Clone -> FVP
       #
-      # The same relative path is used at the destination.
+      # Exact path preservation.
       #
-      # Example:
+      # Official example:
       #
       # Clone:
       # Official_Release/CW11/Release/...
@@ -178,13 +277,25 @@ jobs:
       # FVP:
       # Official_Release/CW11/Release/...
       #
-      # Hotfix:
+      #
+      # Hotfix example:
       #
       # Clone:
       # Official_Release/CW11/Hotfixes/HF01/...
       #
       # FVP:
       # Official_Release/CW11/Hotfixes/HF01/...
+      #
+      #
+      # Daily example:
+      #
+      # Clone:
+      # Daily_Builds/2026-10-29/...
+      #
+      # FVP:
+      # Daily_Builds/2026-10-29/...
+      #
+      # No local temporary download is used.
       # ============================================================
 
       - name: Copy complete folder to FVP
@@ -199,7 +310,7 @@ jobs:
 
           Write-Host ""
           Write-Host "============================================"
-          Write-Host "COPYING COMPLETE FOLDER"
+          Write-Host "COPYING SCOUT CLONE -> FVP"
           Write-Host "============================================"
           Write-Host ""
           Write-Host "Source:"
@@ -212,17 +323,22 @@ jobs:
           jf rt cp `
               "$source*" `
               "$target" `
+              --server-id=scout-fvp `
               --recursive=true `
               --flat=false `
               --fail-no-op
 
+          if ($LASTEXITCODE -ne 0) {
+              throw "Scout Clone -> FVP copy failed with exit code $LASTEXITCODE."
+          }
+
           Write-Host ""
-          Write-Host "Folder copied successfully." `
+          Write-Host "Complete folder copied successfully." `
               -ForegroundColor Green
 
 
       # ============================================================
-      # 7. Verify FVP destination
+      # 8. Verify FVP destination
       # ============================================================
 
       - name: Verify FVP destination
@@ -241,17 +357,45 @@ jobs:
 
           jf rt search `
               "$targetPattern" `
+              --server-id=scout-fvp `
               --recursive=true `
               --limit=1 `
               --fail-no-op
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "FVP destination verification failed for: $env:FOLDER_PATH"
+          }
 
           Write-Host ""
           Write-Host "============================================"
           Write-Host "FVP PROMOTION SUCCESSFUL"
           Write-Host "============================================"
-          Write-Host "Folder:"
+          Write-Host ""
+          Write-Host "Promoted folder:"
           Write-Host "$env:FOLDER_PATH"
           Write-Host ""
-          Write-Host "All folder contents were copied to FVP."
+          Write-Host "Destination:"
+          Write-Host "$env:TARGET_REPO/$env:FOLDER_PATH"
+          Write-Host ""
           Write-Host "============================================" `
               -ForegroundColor Green
+
+
+      # ============================================================
+      # 9. Cleanup runner JFrog configuration
+      #
+      # Cleanup must never turn a successful promotion into a failure.
+      # ============================================================
+
+      - name: Cleanup JFrog configuration
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          if (Get-Command jf -ErrorAction SilentlyContinue) {
+
+              jf c remove scout-fvp --quiet 2>$null
+
+              $global:LASTEXITCODE = 0
+
+          
