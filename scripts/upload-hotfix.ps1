@@ -15,8 +15,9 @@ param (
 
 $ErrorActionPreference = "Stop"
 
+
 # ============================================================
-# FIXED SCOUT CONFIGURATION
+# SCOUT CONFIGURATION
 # ============================================================
 
 $JFROG_URL = "https://artifactory.sctmtrs.xyz/artifactory"
@@ -41,7 +42,6 @@ function ConvertTo-ArtifactoryPath {
     )
 
     $encodedSegments = foreach ($segment in $segments) {
-
         [System.Uri]::EscapeDataString($segment)
     }
 
@@ -55,9 +55,9 @@ function ConvertTo-ArtifactoryPath {
 
 $LocalFolder = $LocalFolder.Trim().TrimEnd("\", "/")
 
-$CWPath = $CWPath.Trim().Trim("\", "/")
+$CWPath = $CWPath.Trim().Trim("\", "/").ToUpperInvariant()
 
-$HFName = $HFName.Trim().Trim("\", "/")
+$HFName = $HFName.Trim().Trim("\", "/").ToUpperInvariant()
 
 
 # ============================================================
@@ -65,13 +65,10 @@ $HFName = $HFName.Trim().Trim("\", "/")
 # ============================================================
 
 if ([string]::IsNullOrWhiteSpace($LocalFolder)) {
-
     throw "Local Folder cannot be empty."
 }
 
-
 if (-not (Test-Path -LiteralPath $LocalFolder -PathType Container)) {
-
     throw "Local folder does not exist: $LocalFolder"
 }
 
@@ -81,19 +78,14 @@ if (-not (Test-Path -LiteralPath $LocalFolder -PathType Container)) {
 # ============================================================
 
 if ([string]::IsNullOrWhiteSpace($CWPath)) {
-
     throw "CW Path cannot be empty."
 }
 
-
 if ($CWPath -notmatch "^CW.+$") {
-
     throw "CW Path must start with CW. Example: CW11"
 }
 
-
 if ($CWPath.Contains("/") -or $CWPath.Contains("\")) {
-
     throw "CW Path must be one folder name."
 }
 
@@ -103,25 +95,20 @@ if ($CWPath.Contains("/") -or $CWPath.Contains("\")) {
 # ============================================================
 
 if ([string]::IsNullOrWhiteSpace($HFName)) {
-
     throw "HF Name cannot be empty."
 }
 
-
 if ($HFName -notmatch "^HF.+$") {
-
     throw "HF Name must start with HF. Example: HF01"
 }
 
-
 if ($HFName.Contains("/") -or $HFName.Contains("\")) {
-
     throw "HF Name must be one folder name."
 }
 
 
 # ============================================================
-# SECURELY REQUEST JFROG TOKEN
+# REQUEST JFROG TOKEN SECURELY
 # ============================================================
 
 if ([string]::IsNullOrWhiteSpace($AccessToken)) {
@@ -129,7 +116,6 @@ if ([string]::IsNullOrWhiteSpace($AccessToken)) {
     Write-Host ""
     Write-Host "Scout JFrog authentication required." `
         -ForegroundColor Yellow
-
     Write-Host ""
 
     $secureToken = Read-Host `
@@ -141,23 +127,19 @@ if ([string]::IsNullOrWhiteSpace($AccessToken)) {
     )
 
     try {
-
         $AccessToken =
             [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
                 $ptr
             )
     }
     finally {
-
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(
             $ptr
         )
     }
 }
 
-
 if ([string]::IsNullOrWhiteSpace($AccessToken)) {
-
     throw "Scout JFrog Access Token cannot be empty."
 }
 
@@ -167,32 +149,30 @@ if ([string]::IsNullOrWhiteSpace($AccessToken)) {
 # ============================================================
 
 $folderItem = Get-Item -LiteralPath $LocalFolder
-
 $folderName = $folderItem.Name
 
 
 # ============================================================
 # BUILD DYNAMIC TARGET
 #
-# User provides:
+# Example:
 #
-# LOCAL:
-# D:\ECU\TSG_BFS
+# Local:
+# C:\Downloads\SACID F220
 #
 # CW:
-# CW29
+# cw11
 #
 # HF:
-# HF03
+# hf01
 #
-# Result:
+# Normalized result:
 #
 # Official_Release/
-# CW29/
+# CW11/
 # Hotfixes/
-# HF03/
-# TSG_BFS/
-#
+# HF01/
+# SACID F220/
 # ============================================================
 
 $promotionPath = "Official_Release/$CWPath/Hotfixes/$HFName"
@@ -201,20 +181,17 @@ $targetRoot = "$promotionPath/$folderName"
 
 
 # ============================================================
-# FIND FILES
+# FIND LOCAL FILES
 # ============================================================
 
 $files = @(
-
     Get-ChildItem `
         -LiteralPath $LocalFolder `
         -File `
         -Recurse
 )
 
-
 if ($files.Count -eq 0) {
-
     throw "No files found inside: $LocalFolder"
 }
 
@@ -227,7 +204,6 @@ Write-Host ""
 Write-Host "============================================"
 Write-Host "        SCOUT HOTFIX UPLOAD"
 Write-Host "============================================"
-
 Write-Host ""
 Write-Host "Local Folder:"
 Write-Host "  $LocalFolder"
@@ -258,11 +234,10 @@ Write-Host ""
 
 
 # ============================================================
-# AUTHENTICATION HEADER
+# AUTHENTICATION
 # ============================================================
 
 $headers = @{
-
     Authorization = "Bearer $AccessToken"
 }
 
@@ -272,11 +247,8 @@ $headers = @{
 # ============================================================
 
 $uploaded = 0
-
 $skipped = 0
-
 $failed = 0
-
 
 $failedFiles =
     New-Object System.Collections.Generic.List[string]
@@ -301,32 +273,24 @@ foreach ($file in $files) {
     # ========================================================
     # SKIP CHECKSUM SIDECAR FILES
     #
-    # We previously received HTTP 409 checksum errors when
-    # directly uploading .sha256 files.
+    # JFrog interprets these as checksum deployments and
+    # previously returned HTTP 409 for mismatched sidecars.
     # ========================================================
 
     $isChecksumSidecar = (
-
         $file.Name.EndsWith(
             ".sha256",
             [System.StringComparison]::OrdinalIgnoreCase
-        )
-
-        -or
-
+        ) -or
         $file.Name.EndsWith(
             ".sha1",
             [System.StringComparison]::OrdinalIgnoreCase
-        )
-
-        -or
-
+        ) -or
         $file.Name.EndsWith(
             ".md5",
             [System.StringComparison]::OrdinalIgnoreCase
         )
     )
-
 
     if ($isChecksumSidecar) {
 
@@ -340,17 +304,15 @@ foreach ($file in $files) {
 
 
     # ========================================================
-    # CONSTRUCT ARTIFACTORY PATH
+    # BUILD ARTIFACTORY PATH
     # ========================================================
 
     $artifactPath =
         "$SCOUT_REPO/$targetRoot/$relativePath"
 
-
     $encodedArtifactPath =
         ConvertTo-ArtifactoryPath `
             -Path $artifactPath
-
 
     $uploadUrl =
         "$JFROG_URL/$encodedArtifactPath"
@@ -374,14 +336,11 @@ foreach ($file in $files) {
             -ErrorAction Stop |
             Out-Null
 
-
         Write-Host "SUCCESS $relativePath" `
             -ForegroundColor Green
 
-
         $uploaded++
     }
-
     catch {
 
         $failed++
@@ -390,15 +349,12 @@ foreach ($file in $files) {
             $relativePath
         )
 
-
         Write-Host "FAILED  $relativePath" `
             -ForegroundColor Red
 
-
         if (
             $null -ne $_.ErrorDetails -and
-            -not [string]::IsNullOrWhiteSpace(
-                $_.ErrorDetails.Message
+            -not [string]::ssage
             )
         ) {
 
@@ -406,7 +362,6 @@ foreach ($file in $files) {
                 $_.ErrorDetails.Message `
                 -ForegroundColor Red
         }
-
         else {
 
             Write-Host `
@@ -425,27 +380,24 @@ Write-Host ""
 Write-Host "============================================"
 Write-Host "            UPLOAD SUMMARY"
 Write-Host "============================================"
-
 Write-Host ""
+
 Write-Host "Uploaded : $uploaded" `
     -ForegroundColor Green
 
 Write-Host "Skipped  : $skipped" `
     -ForegroundColor Yellow
 
-
 if ($failed -eq 0) {
 
     Write-Host "Failed   : 0" `
         -ForegroundColor Green
 }
-
 else {
 
     Write-Host "Failed   : $failed" `
         -ForegroundColor Red
 }
-
 
 Write-Host ""
 Write-Host "Scout Location:"
@@ -456,7 +408,7 @@ Write-Host "============================================"
 
 
 # ============================================================
-# FAIL SCRIPT IF ANY UPLOAD FAILED
+# FAIL IF ANY UPLOAD FAILED
 # ============================================================
 
 if ($failed -gt 0) {
@@ -465,12 +417,16 @@ if ($failed -gt 0) {
     Write-Host "FAILED FILES:" `
         -ForegroundColor Red
 
-
     foreach ($failedFile in $failedFiles) {
 
         Write-Host "  $failedFile" `
             -ForegroundColor Red
- 
+    }
+
+    Write-Host ""
+
+    throw "$failed file(s) failed to upload."
+}
 
 
 if ($uploaded -eq 0) {
@@ -487,8 +443,8 @@ Write-Host ""
 Write-Host "============================================"
 Write-Host "       HOTFIX UPLOAD SUCCESSFUL"
 Write-Host "============================================"
-
 Write-Host ""
+
 Write-Host "Scout Clone:"
 Write-Host "$SCOUT_REPO/$targetRoot"
 
