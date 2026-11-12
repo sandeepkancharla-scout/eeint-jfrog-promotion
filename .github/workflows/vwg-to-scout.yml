@@ -685,12 +685,7 @@ jobs:
                   $env:CALENDAR_WEEK.Trim().ToUpperInvariant()
               )
 
-              if ($calendarWeek -notmatch '^CW[0-9]{1,2}$') {
-                  throw (
-                      'Official Calendar Week must use CW format, ' +
-                      'for example CW29.'
-                  )
-              }
+              
 
               $destinationPath = (
                   "Official_Release/$calendarWeek/Release"
