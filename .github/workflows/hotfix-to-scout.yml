@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   transfer:
-    name: Transfer Rivian Hotfix to Scout
+    name: Add Rivian Hotfix Content to Scout
 
     runs-on:
       - self-hosted
@@ -83,8 +83,8 @@ jobs:
               throw 'JFrog CLI is unavailable.'
           }
 
-      # 3. SET TEMPORARY DIRECTORY
-      - name: Set temporary directory
+      # 3. SET TEMPORARY PATHS
+      - name: Set temporary paths
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -109,8 +109,12 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-          Write-Host 'Temporary directory:'
+          Write-Host 'Temporary staging directory:'
           Write-Host $stagingDirectory
+
+          Write-Host ''
+          Write-Host 'Temporary download specification:'
+          Write-Host $downloadSpec
 
       # 4. VALIDATE INPUTS AND SECRETS
       - name: Validate inputs and secrets
@@ -150,9 +154,30 @@ jobs:
               throw 'SCOUT_CLONE_REPO secret is missing.'
           }
 
+          $calendarWeek = $env:CALENDAR_WEEK.Trim()
+          $hotfixName = $env:HOTFIX_NAME.Trim()
+
+          if (
+              $calendarWeek.Contains('/') -or
+              $calendarWeek.Contains('\')
+          ) {
+              throw (
+                  'The CW/OTA folder cannot contain slash characters.'
+              )
+          }
+
+          if (
+              $hotfixName.Contains('/') -or
+              $hotfixName.Contains('\')
+          ) {
+              throw (
+                  'The hotfix folder cannot contain slash characters.'
+              )
+          }
+
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'HOTFIX INPUT'
+          Write-Host 'RIVIAN HOTFIX INPUT'
           Write-Host '========================================'
 
           Write-Host 'Rivian Folder URL:'
@@ -160,11 +185,15 @@ jobs:
 
           Write-Host ''
           Write-Host 'CW/OTA Folder:'
-          Write-Host $env:CALENDAR_WEEK
+          Write-Host $calendarWeek
 
           Write-Host ''
           Write-Host 'Hotfix Folder:'
-          Write-Host $env:HOTFIX_NAME
+          Write-Host $hotfixName
+
+          Write-Host ''
+          Write-Host 'Existing Scout hotfix content:'
+          Write-Host 'PRESERVED'
 
       # 5. CLEAN EXISTING JFROG CONFIGURATIONS
       - name: Clean existing JFrog configurations
@@ -253,6 +282,7 @@ jobs:
               Write-Host 'Input host:'
               Write-Host $sourceUri.Host
 
+              Write-Host ''
               Write-Host 'Configured Rivian host:'
               Write-Host $configuredUri.Host
 
@@ -322,12 +352,16 @@ jobs:
           Write-Host $sourceRepo
 
           Write-Host ''
-          Write-Host 'Source Folder:'
+          Write-Host 'Source Folder Path:'
           Write-Host $sourceFolderPath
 
           Write-Host ''
-          Write-Host 'Search Pattern:'
+          Write-Host 'Source Search Pattern:'
           Write-Host $sourceSearchPattern
+
+          Write-Host ''
+          Write-Host 'Source Download Pattern:'
+          Write-Host $sourceDownloadPattern
 
           "source_repo=$sourceRepo" |
               Out-File `
@@ -379,6 +413,7 @@ jobs:
               )
           }
 
+          Write-Host ''
           Write-Host 'Rivian source folder verified.'
 
       # 10. CALCULATE SCOUT HOTFIX DESTINATION
@@ -432,6 +467,10 @@ jobs:
           Write-Host 'Complete Scout Target:'
           Write-Host $cloneTarget
 
+          Write-Host ''
+          Write-Host 'Merge mode:'
+          Write-Host 'ADD CONTENT WITHOUT DELETING DESTINATION'
+
           "destination_path=$destinationPath" |
               Out-File `
                   -FilePath $env:GITHUB_OUTPUT `
@@ -444,8 +483,8 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 11. CHECK IF HOTFIX ALREADY EXISTS
-      - name: Check Scout hotfix destination
+      # 11. INSPECT EXISTING SCOUT HOTFIX
+      - name: Inspect existing Scout hotfix
         shell: pwsh
         env:
           CLONE_TARGET: >-
@@ -456,49 +495,35 @@ jobs:
           $searchPattern = "$env:CLONE_TARGET/*"
 
           Write-Host ''
-          Write-Host 'Checking existing Scout destination:'
-          Write-Host $searchPattern
+          Write-Host '========================================'
+          Write-Host 'EXISTING SCOUT HOTFIX CONTENT'
+          Write-Host '========================================'
 
-          $searchOutput = & jf rt search `
+          Write-Host 'Destination:'
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ''
+          Write-Host (
+              'Existing content is allowed and will not be deleted.'
+          )
+
+          jf rt search `
               "$searchPattern" `
               --server-id="$env:SCOUT_SERVER_ID" `
               --recursive=true `
               --include-dirs=false `
-              --limit=1
+              --limit=20
 
           if ($LASTEXITCODE -ne 0) {
               throw (
-                  'Failed to check the Scout hotfix destination.'
+                  'Failed to inspect the Scout hotfix destination.'
               )
           }
 
-          $searchText = $searchOutput -join [Environment]::NewLine
-
-          if ($searchText.Trim()) {
-              try {
-                  $existingArtifacts = @(
-                      $searchText | ConvertFrom-Json
-                  )
-                catch {
-                  throw (
-                      'Could not interpret the Scout destination ' +
-                      'search result.'
-                  )
-              }
-
-              if ($existingArtifacts.Count -gt 0) {
-                  Write-Host ''
-                  Write-Host 'Existing artifact:'
-                  Write-Host $existingArtifacts[0].path
-
-                  throw (
-                      'The target hotfix already contains artifacts. ' +
-                      'Use another hotfix name, such as HF02.'
-                  )
-              }
-          }
-
-          Write-Host 'Scout hotfix destination is available.'
+          Write-Host ''
+          Write-Host (
+              'Inspection complete. The workflow will continue.'
+          )
 
       # 12. PREPARE STAGING DIRECTORY
       - name: Prepare local staging directory
@@ -522,7 +547,7 @@ jobs:
           Write-Host 'Staging directory:'
           Write-Host $env:STAGING_DIR
 
-      # 13. CREATE DOWNLOAD FILE SPEC
+      # 13. CREATE RIVIAN DOWNLOAD SPECIFICATION
       - name: Create Rivian download specification
         shell: pwsh
         env:
@@ -563,15 +588,19 @@ jobs:
           Write-Host 'Local download target:'
           Write-Host $targetPath
 
-      # 14. DOWNLOAD RIVIAN HOTFIX
-      - name: Download Rivian hotfix
+          Write-Host ''
+          Write-Host 'Download specification:'
+          Get-Content -LiteralPath $env:DOWNLOAD_SPEC
+
+      # 14. DOWNLOAD RIVIAN HOTFIX CONTENT
+      - name: Download Rivian hotfix content
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'DOWNLOAD RIVIAN HOTFIX'
+          Write-Host 'DOWNLOAD RIVIAN HOTFIX CONTENT'
           Write-Host '========================================'
 
           jf rt download `
@@ -619,8 +648,8 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 15. PREVIEW SCOUT HOTFIX UPLOAD
-      - name: Preview Scout hotfix upload
+      # 15. PREVIEW SCOUT HOTFIX MERGE
+      - name: Preview Scout hotfix merge
         shell: pwsh
         env:
           CLONE_TARGET: >-
@@ -630,7 +659,7 @@ jobs:
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'SCOUT HOTFIX UPLOAD DRY RUN'
+          Write-Host 'PREVIEW SCOUT HOTFIX MERGE'
           Write-Host '========================================'
 
           Write-Host 'Upload Root:'
@@ -639,6 +668,11 @@ jobs:
           Write-Host ''
           Write-Host 'Scout Destination:'
           Write-Host "$env:CLONE_TARGET/"
+
+          Write-Host ''
+          Write-Host (
+              'Existing destination content will not be deleted.'
+          )
 
           Push-Location $env:STAGING_DIR
 
@@ -652,15 +686,15 @@ jobs:
                   --dry-run
 
               if ($LASTEXITCODE -ne 0) {
-                  throw 'Scout hotfix upload dry run failed.'
+                  throw 'Scout hotfix merge dry run failed.'
               }
           }
           finally {
               Pop-Location
           }
 
-      # 16. UPLOAD HOTFIX TO SCOUT
-      - name: Upload hotfix to Scout
+      # 16. ADD HOTFIX CONTENT TO SCOUT
+      - name: Add hotfix content to Scout
         shell: pwsh
         env:
           CLONE_TARGET: >-
@@ -670,7 +704,7 @@ jobs:
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'UPLOAD RIVIAN HOTFIX TO SCOUT'
+          Write-Host 'ADD RIVIAN HOTFIX CONTENT TO SCOUT'
           Write-Host '========================================'
 
           Write-Host 'Source:'
@@ -679,6 +713,12 @@ jobs:
           Write-Host ''
           Write-Host 'Destination:'
           Write-Host "$env:CLONE_TARGET/"
+
+          Write-Host ''
+          Write-Host (
+              'Existing destination folders and unrelated files ' +
+              'will be preserved.'
+          )
 
           Push-Location $env:STAGING_DIR
 
@@ -703,9 +743,11 @@ jobs:
           }
 
           Write-Host ''
-          Write-Host 'Scout hotfix upload successful.'
+          Write-Host (
+              'Hotfix content successfully added to Scout.'
+          )
 
-      # 17. VERIFY SCOUT HOTFIX
+      # 17. VERIFY SCOUT HOTFIX DESTINATION
       - name: Verify Scout hotfix destination
         shell: pwsh
         env:
@@ -718,7 +760,7 @@ jobs:
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'VERIFY SCOUT HOTFIX'
+          Write-Host 'VERIFY SCOUT HOTFIX DESTINATION'
           Write-Host '========================================'
 
           Write-Host 'Verification Pattern:'
@@ -738,7 +780,7 @@ jobs:
           Write-Host ''
           Write-Host 'Scout hotfix verified successfully.'
 
-      # 18. SUMMARY
+      # 18. TRANSFER SUMMARY
       - name: Hotfix transfer summary
         if: ${{ success() }}
         shell: pwsh
@@ -776,7 +818,7 @@ jobs:
           Write-Host $env:CLONE_TARGET
 
           Write-Host ''
-          Write-Host 'Files Transferred:'
+          Write-Host 'Files Processed:'
           Write-Host $env:FILE_COUNT
 
           Write-Host ''
@@ -788,9 +830,20 @@ jobs:
           )
 
           Write-Host ''
-          Write-Host 'Existing Release content was not modified.'
+          Write-Host 'Existing Hotfix Content:'
+          Write-Host 'PRESERVED'
 
-      # 19. CLEANUP
+          Write-Host ''
+          Write-Host 'Existing Release Content:'
+          Write-Host 'NOT MODIFIED'
+
+          Write-Host ''
+          Write-Host (
+              'New Rivian content was merged into the selected ' +
+              'Scout hotfix destination.'
+          )
+
+      # 19. CLEAN LOCAL TEMPORARY FILES
       - name: Cleanup
         if: ${{ always() }}
         shell: pwsh
@@ -819,5 +872,6 @@ jobs:
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
           Write-Host ''
-          Write-Host 'Temporary files removed.'
+          Write-Host 'Local temporary files removed.'
           Write-Host 'Temporary JFrog configurations removed.'
+          Write-Host 'No remote Scout content was deleted.'
