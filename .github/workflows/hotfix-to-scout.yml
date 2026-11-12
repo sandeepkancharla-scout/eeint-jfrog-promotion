@@ -1,487 +1,823 @@
-name: Hotfix SharePoint to Scout Clone
+name: Rivian to Scout Hotfix
+
+run-name: >-
+  Rivian Hotfix |
+  ${{ inputs.calendar_week }} |
+  ${{ inputs.hotfix_name }}
 
 on:
   workflow_dispatch:
     inputs:
-
-      sharepoint_sync_path:
-        description: "Local synced SharePoint path on the runner"
+      folder_url:
+        description: "Full Rivian JFrog source folder URL"
         required: true
         type: string
 
-      hotfix_folder:
-        description: "Folder name inside the SharePoint location"
+      calendar_week:
+        description: "Target folder, for example CW41 (OTA 2026.39.100)"
         required: true
         type: string
 
-      cw_path:
-        description: "Calendar Week folder, for example CW11"
+      hotfix_name:
+        description: "Hotfix folder, for example HF01"
         required: true
         type: string
 
-      hf_name:
-        description: "Hotfix name, for example HF01"
-        required: true
-        type: string
+permissions:
+  contents: read
 
+concurrency:
+  group: >-
+    rivian-scout-hotfix-${{
+      inputs.calendar_week
+    }}-${{
+      inputs.hotfix_name
+    }}
+  cancel-in-progress: false
 
 jobs:
+  transfer:
+    name: Transfer Rivian Hotfix to Scout
 
-  upload-hotfix:
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
 
-    name: Upload SharePoint Hotfix to Scout
-
-    runs-on: self-hosted
+    timeout-minutes: 120
 
     env:
-      SCOUT_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+      FOLDER_URL: ${{ inputs.folder_url }}
+      CALENDAR_WEEK: ${{ inputs.calendar_week }}
+      HOTFIX_NAME: ${{ inputs.hotfix_name }}
+
+      RIVIAN_URL: ${{ secrets.RIVIAN_JFROG_URL }}
+      RIVIAN_TOKEN: ${{ secrets.RIVIAN_JFROG_ACCESS_TOKEN }}
+
+      SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
+      SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
+      CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
+
+      RIVIAN_SERVER_ID: rivian-source
+      SCOUT_SERVER_ID: scout-target
+
+      JFROG_CLI_OFFER_CONFIG: "false"
+      JFROG_CLI_LOG_LEVEL: INFO
 
     steps:
+      # 1. SET UP JFROG CLI
+      - name: Set up JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          disable-auto-build-publish: true
 
-      # ============================================================
-      # 1. Resolve inputs
-      # ============================================================
-
-      - name: Resolve Hotfix paths
-        id: paths
+      # 2. VERIFY JFROG CLI
+      - name: Verify JFrog CLI
         shell: pwsh
-        env:
-          SHAREPOINT_ROOT: ${{ inputs.sharepoint_sync_path }}
-          HOTFIX_FOLDER: ${{ inputs.hotfix_folder }}
-          CW_PATH: ${{ inputs.cw_path }}
-          HF_NAME: ${{ inputs.hf_name }}
-
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $sharePointRoot = "$env:SHAREPOINT_ROOT".Trim().TrimEnd('\', '/')
-          $folderName     = "$env:HOTFIX_FOLDER".Trim().Trim('\', '/')
-          $cwPath         = "$env:CW_PATH".Trim().Trim('\', '/')
-          $hfName         = "$env:HF_NAME".Trim().Trim('\', '/')
+          jf --version
 
-          if ([string]::IsNullOrWhiteSpace($sharePointRoot)) {
-              throw "SharePoint Sync Path cannot be empty."
+          if ($LASTEXITCODE -ne 0) {
+              throw 'JFrog CLI is unavailable.'
           }
 
-          if ([string]::IsNullOrWhiteSpace($folderName)) {
-              throw "Hotfix Folder cannot be empty."
+      # 3. SET TEMPORARY DIRECTORY
+      - name: Set temporary directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $stagingDirectory = Join-Path `
+              -Path $env:RUNNER_TEMP `
+              -ChildPath "rivian-hotfix-${{ github.run_id }}"
+
+          $downloadSpec = Join-Path `
+              -Path $env:RUNNER_TEMP `
+              -ChildPath "rivian-download-${{ github.run_id }}.json"
+
+          "STAGING_DIR=$stagingDirectory" |
+              Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+
+          "DOWNLOAD_SPEC=$downloadSpec" |
+              Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+
+          Write-Host 'Temporary directory:'
+          Write-Host $stagingDirectory
+
+      # 4. VALIDATE INPUTS AND SECRETS
+      - name: Validate inputs and secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not $env:FOLDER_URL.Trim()) {
+              throw 'Rivian source folder URL is required.'
           }
 
-          if ($folderName.Contains('\') -or $folderName.Contains('/')) {
-              throw "Hotfix Folder must contain only the folder name."
+          if (-not $env:CALENDAR_WEEK.Trim()) {
+              throw 'CW/OTA destination folder is required.'
           }
 
-          if ([string]::IsNullOrWhiteSpace($cwPath)) {
-              throw "CW Path cannot be empty."
+          if (-not $env:HOTFIX_NAME.Trim()) {
+              throw 'Hotfix folder name is required.'
           }
 
-          if ($cwPath -notmatch '^CW.+$') {
-              throw "CW Path must start with CW. Received: $cwPath"
+          if (-not $env:RIVIAN_URL) {
+              throw 'RIVIAN_JFROG_URL secret is missing.'
           }
 
-          if ($cwPath.Contains('\') -or $cwPath.Contains('/')) {
-              throw "CW Path must be one folder name."
+          if (-not $env:RIVIAN_TOKEN) {
+              throw 'RIVIAN_JFROG_ACCESS_TOKEN secret is missing.'
           }
 
-          if ([string]::IsNullOrWhiteSpace($hfName)) {
-              throw "HF Name cannot be empty."
+          if (-not $env:SCOUT_URL) {
+              throw 'SCOUT_JFROG_URL secret is missing.'
           }
 
-          if ($hfName -notmatch '^HF.+$') {
-              throw "HF Name must start with HF. Received: $hfName"
+          if (-not $env:SCOUT_TOKEN) {
+              throw 'SCOUT_JFROG_ACCESS_TOKEN secret is missing.'
           }
 
-          if ($hfName.Contains('\') -or $hfName.Contains('/')) {
-              throw "HF Name must be one folder name."
+          if (-not $env:CLONE_REPO) {
+              throw 'SCOUT_CLONE_REPO secret is missing.'
           }
 
-          # --------------------------------------------------------
-          # Construct local SharePoint-synced source folder
-          # --------------------------------------------------------
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'HOTFIX INPUT'
+          Write-Host '========================================'
 
-          $localFolder = Join-Path `
-              $sharePointRoot `
-              $folderName
+          Write-Host 'Rivian Folder URL:'
+          Write-Host $env:FOLDER_URL
 
-          Write-Host ""
-          Write-Host "Runner computer:"
-          Write-Host "$env:COMPUTERNAME"
+          Write-Host ''
+          Write-Host 'CW/OTA Folder:'
+          Write-Host $env:CALENDAR_WEEK
 
-          Write-Host ""
-          Write-Host "Runner user:"
-          Write-Host "$env:USERNAME"
+          Write-Host ''
+          Write-Host 'Hotfix Folder:'
+          Write-Host $env:HOTFIX_NAME
 
-          Write-Host ""
-          Write-Host "SharePoint root:"
-          Write-Host "$sharePointRoot"
+      # 5. CLEAN EXISTING JFROG CONFIGURATIONS
+      - name: Clean existing JFrog configurations
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          jf c remove "$env:RIVIAN_SERVER_ID" --quiet 2>$null
+          jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
-          Write-Host ""
-          Write-Host "Requested Hotfix folder:"
-          Write-Host "$folderName"
+      # 6. CONFIGURE RIVIAN JFROG
+      - name: Configure Rivian JFrog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
 
-          Write-Host ""
-          Write-Host "Expected local source:"
-          Write-Host "$localFolder"
+          jf c add `
+              "$env:RIVIAN_SERVER_ID" `
+              --url="$env:RIVIAN_URL" `
+              --access-token="$env:RIVIAN_TOKEN" `
+              --interactive=false `
+              --overwrite=true
 
-
-          # --------------------------------------------------------
-          # Validate synced SharePoint location
-          # --------------------------------------------------------
-
-          if (-not (Test-Path -LiteralPath $sharePointRoot -PathType Container)) {
-
-              throw "SharePoint sync location is not accessible by the runner: $sharePointRoot"
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to configure Rivian JFrog.'
           }
 
-          if (-not (Test-Path -LiteralPath $localFolder -PathType Container)) {
+          jf rt ping `
+              --server-id="$env:RIVIAN_SERVER_ID"
 
-              throw "Hotfix folder was not found under the SharePoint sync location: $localFolder"
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Cannot connect to Rivian JFrog.'
           }
 
+          Write-Host 'Rivian JFrog connection successful.'
 
-          # --------------------------------------------------------
-          # Count files
-          # --------------------------------------------------------
-
-          $files = @(
-              Get-ChildItem `
-                  -LiteralPath $localFolder `
-                  -File `
-                  -Recurse
-          )
-
-          if ($files.Count -eq 0) {
-              throw "Hotfix folder contains no files: $localFolder"
-          }
-
-
-          # --------------------------------------------------------
-          # Construct Scout paths
-          # --------------------------------------------------------
-
-          $promotionPath = "Official_Release/$cwPath/Hotfixes/$hfName"
-
-          $targetPath = "$promotionPath/$folderName"
-
-
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "SHAREPOINT HOTFIX -> SCOUT"
-          Write-Host "============================================"
-
-          Write-Host ""
-          Write-Host "Source:"
-          Write-Host "$localFolder"
-
-          Write-Host ""
-          Write-Host "Files:"
-          Write-Host "$($files.Count)"
-
-          Write-Host ""
-          Write-Host "Calendar Week:"
-          Write-Host "$cwPath"
-
-          Write-Host ""
-          Write-Host "Hotfix:"
-          Write-Host "$hfName"
-
-          Write-Host ""
-          Write-Host "Scout Destination:"
-          Write-Host "$env:SCOUT_REPO/$targetPath"
-
-          Write-Host ""
-          Write-Host "============================================"
-
-
-          # --------------------------------------------------------
-          # GitHub step outputs
-          # --------------------------------------------------------
-
-          "local_folder=$localFolder" >> $env:GITHUB_OUTPUT
-          "folder_name=$folderName" >> $env:GITHUB_OUTPUT
-          "cw_path=$cwPath" >> $env:GITHUB_OUTPUT
-          "hf_name=$hfName" >> $env:GITHUB_OUTPUT
-          "promotion_path=$promotionPath" >> $env:GITHUB_OUTPUT
-          "target_path=$targetPath" >> $env:GITHUB_OUTPUT
-
-
-      # ============================================================
-      # 2. Setup JFrog CLI
-      # ============================================================
-
-      - name: Setup JFrog CLI
-        uses: jfrog/setup-jfrog-cli@v4
-
-
-      # ============================================================
-      # 3. Configure Scout JFrog
-      # ============================================================
-
+      # 7. CONFIGURE SCOUT JFROG
       - name: Configure Scout JFrog
         shell: pwsh
-        env:
-          JFROG_URL: ${{ secrets.SCOUT_JFROG_URL }}
-          JFROG_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
-
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if ([string]::IsNullOrWhiteSpace($env:JFROG_URL)) {
-              throw "SCOUT_JFROG_URL secret is empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:JFROG_TOKEN)) {
-              throw "SCOUT_JFROG_ACCESS_TOKEN secret is empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:SCOUT_REPO)) {
-              throw "SCOUT_CLONE_REPO secret is empty."
-          }
-
-          Write-Host ""
-          Write-Host "Configuring Scout JFrog..."
-
-          & jf c remove scout-hotfix --quiet 2>$null
-          $global:LASTEXITCODE = 0
-
-          & jf c add scout-hotfix `
-              --url="$env:JFROG_URL" `
-              --access-token="$env:JFROG_TOKEN" `
-              --interactive=false
+          jf c add `
+              "$env:SCOUT_SERVER_ID" `
+              --url="$env:SCOUT_URL" `
+              --access-token="$env:SCOUT_TOKEN" `
+              --interactive=false `
+              --overwrite=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Failed to configure Scout JFrog."
+              throw 'Failed to configure Scout JFrog.'
           }
 
-          Write-Host ""
-          Write-Host "Testing Scout JFrog..."
-
-          & jf rt ping `
-              --server-id=scout-hotfix
+          jf rt ping `
+              --server-id="$env:SCOUT_SERVER_ID"
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout JFrog connection failed."
+              throw 'Cannot connect to Scout JFrog.'
           }
 
-          Write-Host ""
-          Write-Host "Scout JFrog connection successful." `
-              -ForegroundColor Green
+          Write-Host 'Scout JFrog connection successful.'
 
-
-      # ============================================================
-      # 4. Create JFrog upload spec
-      #
-      # Example:
-      #
-      # SharePoint synced:
-      # Hotfixes-upload\TSG_BFS\...
-      #
-      # Inputs:
-      # CW29
-      # HF03
-      #
-      # Scout:
-      # Official_Release/
-      #   CW29/
-      #     Hotfixes/
-      #       HF03/
-      #         TSG_BFS/
-      #           ...
-      #
-      # Existing HF03 is NOT deleted.
-      # ============================================================
-
-      - name: Create Hotfix upload spec
-        id: upload_spec
+      # 8. PARSE RIVIAN SOURCE URL
+      - name: Parse Rivian folder URL
+        id: parse
         shell: pwsh
-        env:
-          LOCAL_FOLDER: ${{ steps.paths.outputs.local_folder }}
-          FOLDER_NAME: ${{ steps.paths.outputs.folder_name }}
-          PROMOTION_PATH: ${{ steps.paths.outputs.promotion_path }}
-
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $localFolder = $env:LOCAL_FOLDER.Replace('\', '/').TrimEnd('/')
+          $folderUrl = $env:FOLDER_URL.Trim().TrimEnd('/')
 
-          $sourcePattern = "$localFolder/(*)"
+          try {
+              $sourceUri = [System.Uri]$folderUrl
+          }
+          catch {
+              throw 'The Rivian folder URL is invalid.'
+          }
 
-          $targetPattern = (
-              "$env:SCOUT_REPO/" +
-              "$env:PROMOTION_PATH/" +
-              "$env:FOLDER_NAME/{1}"
+          try {
+              $configuredUri = [System.Uri]$env:RIVIAN_URL
+          }
+          catch {
+              throw 'RIVIAN_JFROG_URL is invalid.'
+          }
+
+          if ($sourceUri.Host -ne $configuredUri.Host) {
+              Write-Host 'Input host:'
+              Write-Host $sourceUri.Host
+
+              Write-Host 'Configured Rivian host:'
+              Write-Host $configuredUri.Host
+
+              throw (
+                  'The source URL does not belong to the ' +
+                  'configured Rivian JFrog instance.'
+              )
+          }
+
+          $artifactoryMarker = '/artifactory/'
+
+          $position = $sourceUri.AbsolutePath.IndexOf(
+              $artifactoryMarker,
+              [System.StringComparison]::OrdinalIgnoreCase
           )
 
-          $specPath = Join-Path `
-              $env:RUNNER_TEMP `
-              "hotfix-sharepoint-upload.json"
+          if ($position -lt 0) {
+              throw (
+                  'The Rivian source URL must contain ' +
+                  '/artifactory/.'
+              )
+          }
 
-          $spec = [ordered]@{
+          $relativePath = $sourceUri.AbsolutePath.Substring(
+              $position + $artifactoryMarker.Length
+          )
+
+          $relativePath = [System.Uri]::UnescapeDataString(
+              $relativePath
+          )
+
+          $relativePath = $relativePath.Replace('\', '/')
+          $relativePath = $relativePath.Trim('/')
+
+          $segments = $relativePath.Split(
+              '/',
+              [System.StringSplitOptions]::RemoveEmptyEntries
+          )
+
+          if ($segments.Count -lt 2) {
+              throw (
+                  'The Rivian URL must include a repository ' +
+                  'and folder path.'
+              )
+          }
+
+          $sourceRepo = $segments[0]
+
+          $sourceFolderPath = (
+              $segments[1..($segments.Count - 1)] -join '/'
+          )
+
+          $sourceSearchPattern = (
+              "$sourceRepo/$sourceFolderPath/*"
+          )
+
+          $sourceDownloadPattern = (
+              "$sourceRepo/$sourceFolderPath/(*)"
+          )
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'RIVIAN SOURCE'
+          Write-Host '========================================'
+
+          Write-Host 'Source Repository:'
+          Write-Host $sourceRepo
+
+          Write-Host ''
+          Write-Host 'Source Folder:'
+          Write-Host $sourceFolderPath
+
+          Write-Host ''
+          Write-Host 'Search Pattern:'
+          Write-Host $sourceSearchPattern
+
+          "source_repo=$sourceRepo" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "source_folder_path=$sourceFolderPath" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "source_search_pattern=$sourceSearchPattern" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "source_download_pattern=$sourceDownloadPattern" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+      # 9. VERIFY RIVIAN SOURCE FOLDER
+      - name: Verify Rivian source folder
+        shell: pwsh
+        env:
+          SOURCE_SEARCH_PATTERN: >-
+            ${{ steps.parse.outputs.source_search_pattern }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host 'Searching Rivian source:'
+          Write-Host $env:SOURCE_SEARCH_PATTERN
+
+          jf rt search `
+              "$env:SOURCE_SEARCH_PATTERN" `
+              --server-id="$env:RIVIAN_SERVER_ID" `
+              --recursive=true `
+              --include-dirs=false `
+              --fail-no-op=true
+
+          if ($LASTEXITCODE -ne 0) {
+              throw (
+                  'No artifacts were found in the ' +
+                  'Rivian source folder.'
+              )
+          }
+
+          Write-Host 'Rivian source folder verified.'
+
+      # 10. CALCULATE SCOUT HOTFIX DESTINATION
+      - name: Calculate Scout hotfix destination
+        id: destination
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
+          $calendarWeek = $env:CALENDAR_WEEK.Trim()
+          $hotfixName = $env:HOTFIX_NAME.Trim()
+
+          if (-not $cloneRepo) {
+              throw 'SCOUT_CLONE_REPO is empty.'
+          }
+
+          if (-not $calendarWeek) {
+              throw 'CW/OTA destination folder is empty.'
+          }
+
+          if (-not $hotfixName) {
+              throw 'Hotfix folder name is empty.'
+          }
+
+          $destinationPath = (
+              "$calendarWeek/Hotfixes/$hotfixName"
+          )
+
+          $cloneTarget = (
+              "$cloneRepo/$destinationPath"
+          )
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SCOUT HOTFIX DESTINATION'
+          Write-Host '========================================'
+
+          Write-Host 'CW/OTA Folder:'
+          Write-Host $calendarWeek
+
+          Write-Host ''
+          Write-Host 'Hotfix Folder:'
+          Write-Host $hotfixName
+
+          Write-Host ''
+          Write-Host 'Destination Path:'
+          Write-Host $destinationPath
+
+          Write-Host ''
+          Write-Host 'Complete Scout Target:'
+          Write-Host $cloneTarget
+
+          "destination_path=$destinationPath" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+          "clone_target=$cloneTarget" |
+              Out-File `
+                  -FilePath $env:GITHUB_OUTPUT `
+                  -Encoding utf8 `
+                  -Append
+
+      # 11. CHECK IF HOTFIX ALREADY EXISTS
+      - name: Check Scout hotfix destination
+        shell: pwsh
+        env:
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $searchPattern = "$env:CLONE_TARGET/*"
+
+          Write-Host ''
+          Write-Host 'Checking existing Scout destination:'
+          Write-Host $searchPattern
+
+          $searchOutput = & jf rt search `
+              "$searchPattern" `
+              --server-id="$env:SCOUT_SERVER_ID" `
+              --recursive=true `
+              --include-dirs=false `
+              --limit=1
+
+          if ($LASTEXITCODE -ne 0) {
+              throw (
+                  'Failed to check the Scout hotfix destination.'
+              )
+          }
+
+          $searchText = $searchOutput -join [Environment]::NewLine
+
+          if ($searchText.Trim()) {
+              try {
+                  $existingArtifacts = @(
+                      $searchText | ConvertFrom-Json
+                  )
+                catch {
+                  throw (
+                      'Could not interpret the Scout destination ' +
+                      'search result.'
+                  )
+              }
+
+              if ($existingArtifacts.Count -gt 0) {
+                  Write-Host ''
+                  Write-Host 'Existing artifact:'
+                  Write-Host $existingArtifacts[0].path
+
+                  throw (
+                      'The target hotfix already contains artifacts. ' +
+                      'Use another hotfix name, such as HF02.'
+                  )
+              }
+          }
+
+          Write-Host 'Scout hotfix destination is available.'
+
+      # 12. PREPARE STAGING DIRECTORY
+      - name: Prepare local staging directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (Test-Path -LiteralPath $env:STAGING_DIR) {
+              Remove-Item `
+                  -LiteralPath $env:STAGING_DIR `
+                  -Recurse `
+                  -Force
+          }
+
+          New-Item `
+              -ItemType Directory `
+              -Path $env:STAGING_DIR `
+              -Force |
+              Out-Null
+
+          Write-Host 'Staging directory:'
+          Write-Host $env:STAGING_DIR
+
+      # 13. CREATE DOWNLOAD FILE SPEC
+      - name: Create Rivian download specification
+        shell: pwsh
+        env:
+          SOURCE_DOWNLOAD_PATTERN: >-
+            ${{ steps.parse.outputs.source_download_pattern }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $targetPath = (
+              $env:STAGING_DIR.Replace('\', '/') +
+              '/{1}'
+          )
+
+          $downloadSpecObject = @{
               files = @(
-                  [ordered]@{
-                      pattern   = $sourcePattern
-                      target    = $targetPattern
-                      recursive = "true"
-                      flat      = "true"
+                  @{
+                      pattern = $env:SOURCE_DOWNLOAD_PATTERN
+                      target = $targetPath
+                      recursive = $true
+                      flat = $false
                   }
               )
           }
 
-          $specJson = $spec | ConvertTo-Json -Depth 10
+          $downloadSpecJson = $downloadSpecObject |
+              ConvertTo-Json -Depth 10
 
-          Set-Content `
-              -LiteralPath $specPath `
-              -Value $specJson `
-              -Encoding UTF8
+          $downloadSpecJson |
+              Set-Content `
+                  -LiteralPath $env:DOWNLOAD_SPEC `
+                  -Encoding utf8
 
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "JFROG UPLOAD SPEC"
-          Write-Host "============================================"
+          Write-Host ''
+          Write-Host 'Rivian download pattern:'
+          Write-Host $env:SOURCE_DOWNLOAD_PATTERN
 
-          Write-Host ""
-          Write-Host "Source Pattern:"
-          Write-Host "$sourcePattern"
+          Write-Host ''
+          Write-Host 'Local download target:'
+          Write-Host $targetPath
 
-          Write-Host ""
-          Write-Host "Target Pattern:"
-          Write-Host "$targetPattern"
-
-          Write-Host ""
-          Write-Host "============================================"
-
-          "spec_path=$specPath" >> $env:GITHUB_OUTPUT
-
-
-      # ============================================================
-      # 5. Upload complete folder to Scout
-      #
-      # Existing HF folder is not deleted.
-      #
-      # Existing:
-      # HF03/ECU_A
-      # HF03/ECU_B
-      #
-      # Upload TSG_BFS:
-      #
-      # HF03/
-      #   ECU_A/
-      #   ECU_B/
-      #   TSG_BFS/
-      #
-      # ============================================================
-
-      - name: Upload Hotfix to Scout Clone
+      # 14. DOWNLOAD RIVIAN HOTFIX
+      - name: Download Rivian hotfix
         shell: pwsh
-        env:
-          SPEC_PATH: ${{ steps.upload_spec.outputs.spec_path }}
-          TARGET_PATH: ${{ steps.paths.outputs.target_path }}
-
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "UPLOADING HOTFIX TO SCOUT"
-          Write-Host "============================================"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'DOWNLOAD RIVIAN HOTFIX'
+          Write-Host '========================================'
 
-          Write-Host ""
-          Write-Host "Destination:"
-          Write-Host "$env:SCOUT_REPO/$env:TARGET_PATH"
-
-          Write-Host ""
-
-          & jf rt upload `
-              --spec="$env:SPEC_PATH" `
-              --server-id=scout-hotfix `
-              --fail-no-op
+          jf rt download `
+              --spec="$env:DOWNLOAD_SPEC" `
+              --server-id="$env:RIVIAN_SERVER_ID" `
+              --fail-no-op=true `
+              --threads=1 `
+              --split-count=0 `
+              --retries=2 `
+              --retry-wait-time=10s
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Hotfix upload to Scout failed."
+              throw 'Rivian hotfix download failed.'
           }
 
-          Write-Host ""
-          Write-Host "Hotfix upload completed successfully." `
-              -ForegroundColor Green
+          $files = @(
+              Get-ChildItem `
+                  -LiteralPath $env:STAGING_DIR `
+                  -Recurse `
+                  -File
+          )
 
+          if ($files.Count -eq 0) {
+              throw 'No files were downloaded from Rivian.'
+          }
 
-      # ============================================================
-      # 6. Verify Scout
-      # ============================================================
+          Write-Host ''
+          Write-Host 'Downloaded files:'
+          Write-Host $files.Count
 
-      - name: Verify Scout Hotfix
+          Write-Host ''
+          Write-Host 'Downloaded hierarchy:'
+
+          foreach ($file in $files) {
+              $relativePath = $file.FullName.Substring(
+                  $env:STAGING_DIR.Length
+              ).TrimStart('\')
+
+              Write-Host $relativePath
+          }
+
+          "FILE_COUNT=$($files.Count)" |
+              Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+
+      # 15. PREVIEW SCOUT HOTFIX UPLOAD
+      - name: Preview Scout hotfix upload
         shell: pwsh
         env:
-          TARGET_PATH: ${{ steps.paths.outputs.target_path }}
-
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $targetPattern =
-              "$env:SCOUT_REPO/$env:TARGET_PATH/*"
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'SCOUT HOTFIX UPLOAD DRY RUN'
+          Write-Host '========================================'
 
-          Write-Host ""
-          Write-Host "Verifying Scout:"
-          Write-Host "$targetPattern"
+          Write-Host 'Upload Root:'
+          Write-Host $env:STAGING_DIR
 
-          Write-Host ""
+          Write-Host ''
+          Write-Host 'Scout Destination:'
+          Write-Host "$env:CLONE_TARGET/"
 
-          & jf rt search `
-              "$targetPattern" `
-              --server-id=scout-hotfix `
+          Push-Location $env:STAGING_DIR
+
+          try {
+              jf rt upload `
+                  './*' `
+                  "$env:CLONE_TARGET/" `
+                  --server-id="$env:SCOUT_SERVER_ID" `
+                  --recursive=true `
+                  --flat=false `
+                  --dry-run
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Scout hotfix upload dry run failed.'
+              }
+          }
+          finally {
+              Pop-Location
+          }
+
+      # 16. UPLOAD HOTFIX TO SCOUT
+      - name: Upload hotfix to Scout
+        shell: pwsh
+        env:
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'UPLOAD RIVIAN HOTFIX TO SCOUT'
+          Write-Host '========================================'
+
+          Write-Host 'Source:'
+          Write-Host $env:STAGING_DIR
+
+          Write-Host ''
+          Write-Host 'Destination:'
+          Write-Host "$env:CLONE_TARGET/"
+
+          Push-Location $env:STAGING_DIR
+
+          try {
+              jf rt upload `
+                  './*' `
+                  "$env:CLONE_TARGET/" `
+                  --server-id="$env:SCOUT_SERVER_ID" `
+                  --recursive=true `
+                  --flat=false `
+                  --fail-no-op=true `
+                  --threads=4 `
+                  --retries=3 `
+                  --retry-wait-time=5s
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Scout hotfix upload failed.'
+              }
+          }
+          finally {
+              Pop-Location
+          }
+
+          Write-Host ''
+          Write-Host 'Scout hotfix upload successful.'
+
+      # 17. VERIFY SCOUT HOTFIX
+      - name: Verify Scout hotfix destination
+        shell: pwsh
+        env:
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $verificationPattern = "$env:CLONE_TARGET/*"
+
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'VERIFY SCOUT HOTFIX'
+          Write-Host '========================================'
+
+          Write-Host 'Verification Pattern:'
+          Write-Host $verificationPattern
+
+          jf rt search `
+              "$verificationPattern" `
+              --server-id="$env:SCOUT_SERVER_ID" `
               --recursive=true `
-              --limit=1 `
-              --fail-no-op
+              --include-dirs=false `
+              --fail-no-op=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Scout Hotfix verification failed."
+              throw 'Scout hotfix verification failed.'
           }
 
-          Write-Host ""
-          Write-Host "============================================"
-          Write-Host "HOTFIX UPLOAD SUCCESSFUL"
-          Write-Host "============================================"
+          Write-Host ''
+          Write-Host 'Scout hotfix verified successfully.'
 
-          Write-Host ""
-          Write-Host "Scout Location:"
-          Write-Host "$env:SCOUT_REPO/$env:TARGET_PATH"
-
-          Write-Host ""
-          Write-Host "Promotion Root:"
-          Write-Host "${{ steps.paths.outputs.promotion_path }}"
-
-          Write-Host ""
-          Write-Host "============================================" `
-              -ForegroundColor Green
-
-
-      # ============================================================
-      # 7. Cleanup
-      # ============================================================
-
-      - name: Cleanup
-        if: always()
-        continue-on-error: true
+      # 18. SUMMARY
+      - name: Hotfix transfer summary
+        if: ${{ success() }}
         shell: pwsh
+        env:
+          SOURCE_REPO: >-
+            ${{ steps.parse.outputs.source_repo }}
 
+          SOURCE_FOLDER_PATH: >-
+            ${{ steps.parse.outputs.source_folder_path }}
+
+          CLONE_TARGET: >-
+            ${{ steps.destination.outputs.clone_target }}
         run: |
-          $ErrorActionPreference = 'Continue'
+          Write-Host ''
+          Write-Host '========================================'
+          Write-Host 'RIVIAN TO SCOUT HOTFIX SUCCESSFUL'
+          Write-Host '========================================'
 
-          & jf c remove scout-hotfix --quiet 2>$null
-          $global:LASTEXITCODE = 0
+          Write-Host 'Rivian Source:'
+          Write-Host (
+              "$env:SOURCE_REPO/" +
+              "$env:SOURCE_FOLDER_PATH"
+          )
 
-          $specPath = Join-Path `
-              $env:RUNNER_TEMP `
-              "hotfix-sharepoint-upload.json"
+          Write-Host ''
+          Write-Host 'CW/OTA Folder:'
+          Write-Host $env:CALENDAR_WEEK
 
-          if (Test-Path -LiteralPath $specPath) {
+          Write-Host ''
+          Write-Host 'Hotfix Folder:'
+          Write-Host $env:HOTFIX_NAME
 
+          Write-Host ''
+          Write-Host 'Scout Destination:'
+          Write-Host $env:CLONE_TARGET
+
+          Write-Host ''
+          Write-Host 'Files Transferred:'
+          Write-Host $env:FILE_COUNT
+
+          Write-Host ''
+          Write-Host 'Destination hierarchy:'
+          Write-Host (
+              "$env:CALENDAR_WEEK/" +
+              "Hotfixes/" +
+              "$env:HOTFIX_NAME"
+          )
+
+          Write-Host ''
+          Write-Host 'Existing Release content was not modified.'
+
+      # 19. CLEANUP
+      - name: Cleanup
+        if: ${{ always() }}
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (
+              $env:STAGING_DIR -and
+              (Test-Path -LiteralPath $env:STAGING_DIR)
+          ) {
               Remove-Item `
-                  -LiteralPath $specPath `
-                  -Force `
-                  -ErrorAction SilentlyContinue
+                  -LiteralPath $env:STAGING_DIR `
+                  -Recurse `
+                  -Force
           }
 
-          Write-Host "Cleanup completed."
+          if (
+              $env:DOWNLOAD_SPEC -and
+              (Test-Path -LiteralPath $env:DOWNLOAD_SPEC)
+          ) {
+              Remove-Item `
+                  -LiteralPath $env:DOWNLOAD_SPEC `
+                  -Force
+          }
 
-          exit 0
+          jf c remove "$env:RIVIAN_SERVER_ID" --quiet 2>$null
+          jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
+
+          Write-Host ''
+          Write-Host 'Temporary files removed.'
+          Write-Host 'Temporary JFrog configurations removed.'
