@@ -9,12 +9,12 @@ on:
   workflow_dispatch:
     inputs:
       folder_url:
-        description: "Full Rivian JFrog source folder URL"
+        description: "Full Rivian/VWG JFrog source folder URL"
         required: true
         type: string
 
       calendar_week:
-        description: "Target folder, for example CW41 (OTA 2026.39.100)"
+        description: "Target CW/OTA folder, for example CW41 (OTA 2026.39.100)"
         required: true
         type: string
 
@@ -51,14 +51,14 @@ jobs:
       CALENDAR_WEEK: ${{ inputs.calendar_week }}
       HOTFIX_NAME: ${{ inputs.hotfix_name }}
 
-      RIVIAN_URL: ${{ secrets.RIVIAN_JFROG_URL }}
-      RIVIAN_TOKEN: ${{ secrets.RIVIAN_JFROG_ACCESS_TOKEN }}
+      SOURCE_URL: ${{ secrets.VWG_JFROG_URL }}
+      SOURCE_TOKEN: ${{ secrets.VWG_JFROG_ACCESS_TOKEN }}
 
       SCOUT_URL: ${{ secrets.SCOUT_JFROG_URL }}
       SCOUT_TOKEN: ${{ secrets.SCOUT_JFROG_ACCESS_TOKEN }}
       CLONE_REPO: ${{ secrets.SCOUT_CLONE_REPO }}
 
-      RIVIAN_SERVER_ID: rivian-source
+      SOURCE_SERVER_ID: rivian-source
       SCOUT_SERVER_ID: scout-target
 
       JFROG_CLI_OFFER_CONFIG: "false"
@@ -122,24 +122,24 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if (-not $env:FOLDER_URL.Trim()) {
+          if (-not $env:FOLDER_URL) {
               throw 'Rivian source folder URL is required.'
           }
 
-          if (-not $env:CALENDAR_WEEK.Trim()) {
+          if (-not $env:CALENDAR_WEEK) {
               throw 'CW/OTA destination folder is required.'
           }
 
-          if (-not $env:HOTFIX_NAME.Trim()) {
+          if (-not $env:HOTFIX_NAME) {
               throw 'Hotfix folder name is required.'
           }
 
-          if (-not $env:RIVIAN_URL) {
-              throw 'RIVIAN_JFROG_URL secret is missing.'
+          if (-not $env:SOURCE_URL) {
+              throw 'VWG_JFROG_URL secret is missing.'
           }
 
-          if (-not $env:RIVIAN_TOKEN) {
-              throw 'RIVIAN_JFROG_ACCESS_TOKEN secret is missing.'
+          if (-not $env:SOURCE_TOKEN) {
+              throw 'VWG_JFROG_ACCESS_TOKEN secret is missing.'
           }
 
           if (-not $env:SCOUT_URL) {
@@ -154,25 +154,20 @@ jobs:
               throw 'SCOUT_CLONE_REPO secret is missing.'
           }
 
+          $folderUrl = $env:FOLDER_URL.Trim()
           $calendarWeek = $env:CALENDAR_WEEK.Trim()
           $hotfixName = $env:HOTFIX_NAME.Trim()
 
-          if (
-              $calendarWeek.Contains('/') -or
-              $calendarWeek.Contains('\')
-          ) {
-              throw (
-                  'The CW/OTA folder cannot contain slash characters.'
-              )
+          if (-not $folderUrl) {
+              throw 'Rivian source folder URL cannot be empty.'
           }
 
-          if (
-              $hotfixName.Contains('/') -or
-              $hotfixName.Contains('\')
-          ) {
-              throw (
-                  'The hotfix folder cannot contain slash characters.'
-              )
+          if (-not $calendarWeek) {
+              throw 'CW/OTA destination folder cannot be empty.'
+          }
+
+          if (-not $hotfixName) {
+              throw 'Hotfix folder name cannot be empty.'
           }
 
           Write-Host ''
@@ -180,8 +175,8 @@ jobs:
           Write-Host 'RIVIAN HOTFIX INPUT'
           Write-Host '========================================'
 
-          Write-Host 'Rivian Folder URL:'
-          Write-Host $env:FOLDER_URL
+          Write-Host 'Rivian Source URL:'
+          Write-Host $folderUrl
 
           Write-Host ''
           Write-Host 'CW/OTA Folder:'
@@ -192,7 +187,7 @@ jobs:
           Write-Host $hotfixName
 
           Write-Host ''
-          Write-Host 'Existing Scout hotfix content:'
+          Write-Host 'Existing Scout content:'
           Write-Host 'PRESERVED'
 
       # 5. CLEAN EXISTING JFROG CONFIGURATIONS
@@ -200,34 +195,34 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          jf c remove "$env:RIVIAN_SERVER_ID" --quiet 2>$null
+          jf c remove "$env:SOURCE_SERVER_ID" --quiet 2>$null
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
-      # 6. CONFIGURE RIVIAN JFROG
-      - name: Configure Rivian JFrog
+      # 6. CONFIGURE SOURCE JFROG
+      - name: Configure source JFrog
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           jf c add `
-              "$env:RIVIAN_SERVER_ID" `
-              --url="$env:RIVIAN_URL" `
-              --access-token="$env:RIVIAN_TOKEN" `
+              "$env:SOURCE_SERVER_ID" `
+              --url="$env:SOURCE_URL" `
+              --access-token="$env:SOURCE_TOKEN" `
               --interactive=false `
               --overwrite=true
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Failed to configure Rivian JFrog.'
+              throw 'Failed to configure the source JFrog.'
           }
 
           jf rt ping `
-              --server-id="$env:RIVIAN_SERVER_ID"
+              --server-id="$env:SOURCE_SERVER_ID"
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Cannot connect to Rivian JFrog.'
+              throw 'Cannot connect to the source JFrog.'
           }
 
-          Write-Host 'Rivian JFrog connection successful.'
+          Write-Host 'Source JFrog connection successful.'
 
       # 7. CONFIGURE SCOUT JFROG
       - name: Configure Scout JFrog
@@ -255,8 +250,8 @@ jobs:
 
           Write-Host 'Scout JFrog connection successful.'
 
-      # 8. PARSE RIVIAN SOURCE URL
-      - name: Parse Rivian folder URL
+      # 8. PARSE SOURCE FOLDER URL
+      - name: Parse source folder URL
         id: parse
         shell: pwsh
         run: |
@@ -268,27 +263,27 @@ jobs:
               $sourceUri = [System.Uri]$folderUrl
           }
           catch {
-              throw 'The Rivian folder URL is invalid.'
+              throw 'The source folder URL is invalid.'
           }
 
           try {
-              $configuredUri = [System.Uri]$env:RIVIAN_URL
+              $configuredUri = [System.Uri]$env:SOURCE_URL
           }
           catch {
-              throw 'RIVIAN_JFROG_URL is invalid.'
+              throw 'VWG_JFROG_URL is invalid.'
           }
 
           if ($sourceUri.Host -ne $configuredUri.Host) {
-              Write-Host 'Input host:'
+              Write-Host 'Input source host:'
               Write-Host $sourceUri.Host
 
               Write-Host ''
-              Write-Host 'Configured Rivian host:'
+              Write-Host 'Configured source host:'
               Write-Host $configuredUri.Host
 
               throw (
                   'The source URL does not belong to the ' +
-                  'configured Rivian JFrog instance.'
+                  'configured source JFrog instance.'
               )
           }
 
@@ -301,8 +296,7 @@ jobs:
 
           if ($position -lt 0) {
               throw (
-                  'The Rivian source URL must contain ' +
-                  '/artifactory/.'
+                  'The source URL must contain /artifactory/.'
               )
           }
 
@@ -324,7 +318,7 @@ jobs:
 
           if ($segments.Count -lt 2) {
               throw (
-                  'The Rivian URL must include a repository ' +
+                  'The source URL must include a repository ' +
                   'and folder path.'
               )
           }
@@ -387,8 +381,8 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 9. VERIFY RIVIAN SOURCE FOLDER
-      - name: Verify Rivian source folder
+      # 9. VERIFY SOURCE FOLDER
+      - name: Verify source folder
         shell: pwsh
         env:
           SOURCE_SEARCH_PATTERN: >-
@@ -396,25 +390,24 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host 'Searching Rivian source:'
+          Write-Host 'Searching source folder:'
           Write-Host $env:SOURCE_SEARCH_PATTERN
 
           jf rt search `
               "$env:SOURCE_SEARCH_PATTERN" `
-              --server-id="$env:RIVIAN_SERVER_ID" `
+              --server-id="$env:SOURCE_SERVER_ID" `
               --recursive=true `
               --include-dirs=false `
               --fail-no-op=true
 
           if ($LASTEXITCODE -ne 0) {
               throw (
-                  'No artifacts were found in the ' +
-                  'Rivian source folder.'
+                  'No artifacts were found in the source folder.'
               )
           }
 
           Write-Host ''
-          Write-Host 'Rivian source folder verified.'
+          Write-Host 'Source folder verified successfully.'
 
       # 10. CALCULATE SCOUT HOTFIX DESTINATION
       - name: Calculate Scout hotfix destination
@@ -468,8 +461,8 @@ jobs:
           Write-Host $cloneTarget
 
           Write-Host ''
-          Write-Host 'Merge mode:'
-          Write-Host 'ADD CONTENT WITHOUT DELETING DESTINATION'
+          Write-Host 'Upload Mode:'
+          Write-Host 'MERGE WITHOUT REMOTE DELETE'
 
           "destination_path=$destinationPath" |
               Out-File `
@@ -496,7 +489,7 @@ jobs:
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'EXISTING SCOUT HOTFIX CONTENT'
+          Write-Host 'INSPECT EXISTING SCOUT HOTFIX'
           Write-Host '========================================'
 
           Write-Host 'Destination:'
@@ -521,11 +514,10 @@ jobs:
           }
 
           Write-Host ''
-          Write-Host (
-              'Inspection complete. The workflow will continue.'
-          )
+          Write-Host 'Inspection complete.'
+          Write-Host 'The workflow will continue with the merge.'
 
-      # 12. PREPARE STAGING DIRECTORY
+      # 12. PREPARE LOCAL STAGING DIRECTORY
       - name: Prepare local staging directory
         shell: pwsh
         run: |
@@ -547,8 +539,8 @@ jobs:
           Write-Host 'Staging directory:'
           Write-Host $env:STAGING_DIR
 
-      # 13. CREATE RIVIAN DOWNLOAD SPECIFICATION
-      - name: Create Rivian download specification
+      # 13. CREATE DOWNLOAD SPECIFICATION
+      - name: Create source download specification
         shell: pwsh
         env:
           SOURCE_DOWNLOAD_PATTERN: >-
@@ -581,7 +573,7 @@ jobs:
                   -Encoding utf8
 
           Write-Host ''
-          Write-Host 'Rivian download pattern:'
+          Write-Host 'Source download pattern:'
           Write-Host $env:SOURCE_DOWNLOAD_PATTERN
 
           Write-Host ''
@@ -605,7 +597,7 @@ jobs:
 
           jf rt download `
               --spec="$env:DOWNLOAD_SPEC" `
-              --server-id="$env:RIVIAN_SERVER_ID" `
+              --server-id="$env:SOURCE_SERVER_ID" `
               --fail-no-op=true `
               --threads=1 `
               --split-count=0 `
@@ -624,7 +616,7 @@ jobs:
           )
 
           if ($files.Count -eq 0) {
-              throw 'No files were downloaded from Rivian.'
+              throw 'No files were downloaded from the source.'
           }
 
           Write-Host ''
@@ -868,7 +860,7 @@ jobs:
                   -Force
           }
 
-          jf c remove "$env:RIVIAN_SERVER_ID" --quiet 2>$null
+          jf c remove "$env:SOURCE_SERVER_ID" --quiet 2>$null
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
           Write-Host ''
