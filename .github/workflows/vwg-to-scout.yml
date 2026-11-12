@@ -208,12 +208,7 @@ jobs:
           if ($env:BUILD_TYPE -eq 'official') {
               $calendarWeek = $env:CALENDAR_WEEK.Trim().ToUpperInvariant()
 
-              if ($calendarWeek -notmatch '^CW[0-9]{1,2}$') {
-                  throw (
-                      'For Official builds, Calendar Week must use ' +
-                      'CW format, for example CW29.'
-                  )
-              }
+              
 
               if (-not $env:APPROVAL_URL) {
                   throw (
