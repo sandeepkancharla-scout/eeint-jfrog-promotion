@@ -12,12 +12,10 @@ on:
         description: "Full Rivian/VWG JFrog source folder URL"
         required: true
         type: string
-
       calendar_week:
         description: "Target CW/OTA folder, for example CW41 (OTA 2026.39.100)"
         required: true
         type: string
-
       hotfix_name:
         description: "Hotfix folder, for example HF01"
         required: true
@@ -37,7 +35,7 @@ concurrency:
 
 jobs:
   transfer:
-    name: Add Rivian Hotfix Content to Scout
+    name: Merge Rivian Hotfix into Scout
 
     runs-on:
       - self-hosted
@@ -83,41 +81,8 @@ jobs:
               throw 'JFrog CLI is unavailable.'
           }
 
-      # 3. SET TEMPORARY PATHS
-      - name: Set temporary paths
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $stagingDirectory = Join-Path `
-              -Path $env:RUNNER_TEMP `
-              -ChildPath "rivian-hotfix-${{ github.run_id }}"
-
-          $downloadSpec = Join-Path `
-              -Path $env:RUNNER_TEMP `
-              -ChildPath "rivian-download-${{ github.run_id }}.json"
-
-          "STAGING_DIR=$stagingDirectory" |
-              Out-File `
-                  -FilePath $env:GITHUB_ENV `
-                  -Encoding utf8 `
-                  -Append
-
-          "DOWNLOAD_SPEC=$downloadSpec" |
-              Out-File `
-                  -FilePath $env:GITHUB_ENV `
-                  -Encoding utf8 `
-                  -Append
-
-          Write-Host 'Temporary staging directory:'
-          Write-Host $stagingDirectory
-
-          Write-Host ''
-          Write-Host 'Temporary download specification:'
-          Write-Host $downloadSpec
-
-      # 4. VALIDATE INPUTS AND SECRETS
-      - name: Validate inputs and secrets
+      # 3. VALIDATE INPUTS AND SET TEMPORARY PATHS
+      - name: Validate inputs and set temporary paths
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -158,16 +123,13 @@ jobs:
           )
 
           foreach ($requiredValue in $requiredValues) {
-              if (
-                  [string]::IsNullOrWhiteSpace(
-                      [string]$requiredValue.Value
-                  )
-              ) {
+              $value = [string]$requiredValue.Value
+
+              if ([string]::IsNullOrWhiteSpace($value)) {
                   throw "$($requiredValue.Name) is missing or empty."
               }
           }
 
-          $folderUrl = $env:FOLDER_URL.Trim()
           $calendarWeek = $env:CALENDAR_WEEK.Trim()
           $hotfixName = $env:HOTFIX_NAME.Trim()
 
@@ -191,39 +153,44 @@ jobs:
               )
           }
 
+          $stagingDirectory = Join-Path `
+              -Path $env:RUNNER_TEMP `
+              -ChildPath "rivian-hotfix-${{ github.run_id }}"
+
+          $downloadSpec = Join-Path `
+              -Path $env:RUNNER_TEMP `
+              -ChildPath "rivian-download-${{ github.run_id }}.json"
+
+          "STAGING_DIR=$stagingDirectory" |
+              Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+
+          "DOWNLOAD_SPEC=$downloadSpec" |
+              Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+
           Write-Host ''
           Write-Host '========================================'
           Write-Host 'RIVIAN HOTFIX INPUT'
           Write-Host '========================================'
+          Write-Host "CW/OTA Folder: $calendarWeek"
+          Write-Host "Hotfix Folder: $hotfixName"
+          Write-Host "Temporary Directory: $stagingDirectory"
+          Write-Host 'Upload mode: merge without remote deletion'
 
-          Write-Host 'Rivian Source URL:'
-          Write-Host $folderUrl
-
-          Write-Host ''
-          Write-Host 'CW/OTA Folder:'
-          Write-Host $calendarWeek
-
-          Write-Host ''
-          Write-Host 'Hotfix Folder:'
-          Write-Host $hotfixName
-
-          Write-Host ''
-          Write-Host 'Existing Scout content:'
-          Write-Host 'PRESERVED'
-
-          Write-Host ''
-          Write-Host 'Matching existing artifact:'
-          Write-Host 'UPLOAD TO THE SAME PATH'
-
-      # 5. CLEAN EXISTING JFROG CONFIGURATIONS
-      - name: Clean existing JFrog configurations
+      # 4. REMOVE STALE JFROG CONFIGURATIONS
+      - name: Remove stale JFrog configurations
         shell: pwsh
         continue-on-error: true
         run: |
           jf c remove "$env:SOURCE_SERVER_ID" --quiet 2>$null
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
-      # 6. CONFIGURE SOURCE JFROG
+      # 5. CONFIGURE SOURCE JFROG
       - name: Configure source JFrog
         shell: pwsh
         run: |
@@ -249,7 +216,7 @@ jobs:
 
           Write-Host 'Source JFrog connection successful.'
 
-      # 7. CONFIGURE SCOUT JFROG
+      # 6. CONFIGURE SCOUT JFROG
       - name: Configure Scout JFrog
         shell: pwsh
         run: |
@@ -275,9 +242,9 @@ jobs:
 
           Write-Host 'Scout JFrog connection successful.'
 
-      # 8. PARSE SOURCE FOLDER URL
-      - name: Parse source folder URL
-        id: parse
+      # 7. PARSE SOURCE AND CALCULATE DESTINATION
+      - name: Parse source and calculate destination
+        id: paths
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -298,43 +265,42 @@ jobs:
               throw 'VWG_JFROG_URL is invalid.'
           }
 
-          if ($sourceUri.Host -ne $configuredUri.Host) {
-              Write-Host 'Input source host:'
-              Write-Host $sourceUri.Host
+          if (
+              -not $sourceUri.IsAbsoluteUri -or
+              -not $configuredUri.IsAbsoluteUri
+          ) {
+              throw 'Source and configured JFrog URLs must be absolute URLs.'
+          }
 
-              Write-Host ''
-              Write-Host 'Configured source host:'
-              Write-Host $configuredUri.Host
-
+          if (
+              $sourceUri.Host -ne $configuredUri.Host
+          ) {
               throw (
-                  'The source URL does not belong to the ' +
+                  'The source folder URL does not belong to the ' +
                   'configured source JFrog instance.'
               )
           }
 
-          $artifactoryMarker = '/artifactory/'
+          $marker = '/artifactory/'
 
           $position = $sourceUri.AbsolutePath.IndexOf(
-              $artifactoryMarker,
+              $marker,
               [System.StringComparison]::OrdinalIgnoreCase
           )
 
           if ($position -lt 0) {
-              throw (
-                  'The source URL must contain /artifactory/.'
-              )
+              throw 'The source URL must contain /artifactory/.'
           }
 
           $relativePath = $sourceUri.AbsolutePath.Substring(
-              $position + $artifactoryMarker.Length
+              $position + $marker.Length
           )
 
           $relativePath = [System.Uri]::UnescapeDataString(
               $relativePath
           )
 
-          $relativePath = $relativePath.Replace('\', '/')
-          $relativePath = $relativePath.Trim('/')
+          $relativePath = $relativePath.Replace('\', '/').Trim('/')
 
           $segments = $relativePath.Split(
               '/',
@@ -343,8 +309,8 @@ jobs:
 
           if ($segments.Count -lt 2) {
               throw (
-                  'The source URL must include a repository ' +
-                  'and folder path.'
+                  'The source URL must include an Artifactory ' +
+                  'repository and a folder path.'
               )
           }
 
@@ -362,25 +328,24 @@ jobs:
               "$sourceRepo/$sourceFolderPath/(*)"
           )
 
+          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
+
+          $destinationPath = (
+              "$($env:CALENDAR_WEEK.Trim())/" +
+              "Hotfixes/" +
+              "$($env:HOTFIX_NAME.Trim())"
+          )
+
+          $cloneTarget = "$cloneRepo/$destinationPath"
+
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'RIVIAN SOURCE'
+          Write-Host 'TRANSFER PATHS'
           Write-Host '========================================'
-
-          Write-Host 'Source Repository:'
-          Write-Host $sourceRepo
-
-          Write-Host ''
-          Write-Host 'Source Folder Path:'
-          Write-Host $sourceFolderPath
-
-          Write-Host ''
-          Write-Host 'Source Search Pattern:'
-          Write-Host $sourceSearchPattern
-
-          Write-Host ''
-          Write-Host 'Source Download Pattern:'
-          Write-Host $sourceDownloadPattern
+          Write-Host "Source Repository: $sourceRepo"
+          Write-Host "Source Folder: $sourceFolderPath"
+          Write-Host "Source Pattern: $sourceSearchPattern"
+          Write-Host "Scout Target: $cloneTarget"
 
           "source_repo=$sourceRepo" |
               Out-File `
@@ -406,80 +371,9 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 9. VERIFY SOURCE FOLDER
-      - name: Verify source folder
-        shell: pwsh
-        env:
-          SOURCE_SEARCH_PATTERN: >-
-            ${{ steps.parse.outputs.source_search_pattern }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Searching source folder:'
-          Write-Host $env:SOURCE_SEARCH_PATTERN
-
-          jf rt search `
-              "$env:SOURCE_SEARCH_PATTERN" `
-              --server-id="$env:SOURCE_SERVER_ID" `
-              --recursive=true `
-              --include-dirs=false `
-              --fail-no-op=true
-
-          if ($LASTEXITCODE -ne 0) {
-              throw (
-                  'No artifacts were found in the source folder.'
-              )
-          }
-
-          Write-Host ''
-          Write-Host 'Source folder verified successfully.'
-
-      # 10. CALCULATE SCOUT HOTFIX DESTINATION
-      - name: Calculate Scout hotfix destination
-        id: destination
-        shell: pwsh
- n: |
-          $ErrorActionPreference = 'Stop'
-
-          $cloneRepo = $env:CLONE_REPO.Trim().Trim('/')
-          $calendarWeek = $env:CALENDAR_WEEK.Trim()
-          $hotfixName = $env:HOTFIX_NAME.Trim()
-
-          $destinationPath = (
-              "$calendarWeek/Hotfixes/$hotfixName"
-          )
-
-          $cloneTarget = (
-              "$cloneRepo/$destinationPath"
-          )
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'SCOUT HOTFIX DESTINATION'
-          Write-Host '========================================'
-
-          Write-Host 'CW/OTA Folder:'
-          Write-Host $calendarWeek
-
-          Write-Host ''
-          Write-Host 'Hotfix Folder:'
-          Write-Host $hotfixName
-
-          Write-Host ''
-          Write-Host 'Destination Path:'
-          Write-Host $destinationPath
-
-          Write-Host ''
-          Write-Host 'Complete Scout Target:'
-          Write-Host $cloneTarget
-
-          Write-Host ''
-          Write-Host 'Upload Mode:'
-          Write-Host 'MERGE WITHOUT REMOTE DELETE'
-
           "destination_path=$destinationPath" |
               Out-File `
-                  -FilePath $env:GITHUB_OUTPUT `
+         -FilePath $env:GITHUB_OUTPUT `
                   -Encoding utf8 `
                   -Append
 
@@ -489,50 +383,35 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 11. INSPECT EXISTING SCOUT HOTFIX
-      - name: Inspect existing Scout hotfix
+      # 8. VERIFY SOURCE CONTENT
+      - name: Verify source content
         shell: pwsh
         env:
-          CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+          SOURCE_SEARCH_PATTERN: >-
+            ${{ steps.paths.outputs.source_search_pattern }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $searchPattern = "$env:CLONE_TARGET/*"
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'INSPECT EXISTING SCOUT HOTFIX'
-          Write-Host '========================================'
-
-          Write-Host 'Destination:'
-          Write-Host $env:CLONE_TARGET
-
-          Write-Host ''
-          Write-Host (
-              'Existing content is allowed and will not be deleted.'
-          )
-
           jf rt search `
-              "$searchPattern" `
-              --server-id="$env:SCOUT_SERVER_ID" `
+              "$env:SOURCE_SEARCH_PATTERN" `
+              --server-id="$env:SOURCE_SERVER_ID" `
               --recursive=true `
               --include-dirs=false `
-              --limit=20
+              --fail-no-op=true `
+              --limit=1
 
           if ($LASTEXITCODE -ne 0) {
-              throw (
-                  'Failed to inspect the Scout hotfix destination.'
-              )
+              throw 'No artifacts were found in the source folder.'
           }
 
-          Write-Host ''
-          Write-Host 'Inspection complete.'
-          Write-Host 'The workflow will continue.'
+          Write-Host 'Source folder contains artifacts.'
 
-      # 12. PREPARE LOCAL STAGING DIRECTORY
-      - name: Prepare local staging directory
+      # 9. PREPARE STAGING AND DOWNLOAD SPEC
+      - name: Prepare staging and download specification
         shell: pwsh
+        env:
+          SOURCE_DOWNLOAD_PATTERN: >-
+            ${{ steps.paths.outputs.source_download_pattern }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -548,18 +427,6 @@ jobs:
               -Path $env:STAGING_DIR `
               -Force |
               Out-Null
-
-          Write-Host 'Staging directory:'
-          Write-Host $env:STAGING_DIR
-
-      # 13. CREATE CORRECTED JFROG DOWNLOAD SPECIFICATION
-      - name: Create source download specification
-        shell: pwsh
-        env:
-          SOURCE_DOWNLOAD_PATTERN: >-
-            ${{ steps.parse.outputs.source_download_pattern }}
-        run: |
-          $ErrorActionPreference = 'Stop'
 
           $targetPath = (
               $env:STAGING_DIR.Replace('\', '/') +
@@ -585,19 +452,10 @@ jobs:
                   -LiteralPath $env:DOWNLOAD_SPEC `
                   -Encoding utf8
 
-          Write-Host ''
-          Write-Host 'Source download pattern:'
-          Write-Host $env:SOURCE_DOWNLOAD_PATTERN
-
-          Write-Host ''
-          Write-Host 'Local download target:'
-          Write-Host $targetPath
-
-          Write-Host ''
-          Write-Host 'Generated JFrog Download Spec:'
+          Write-Host 'Generated JFrog download specification:'
           Get-Content -LiteralPath $env:DOWNLOAD_SPEC
 
-      # 14. DOWNLOAD RIVIAN HOTFIX CONTENT
+      # 10. DOWNLOAD SOURCE HOTFIX CONTENT
       - name: Download Rivian hotfix content
         shell: pwsh
         run: |
@@ -614,7 +472,7 @@ jobs:
               --fail-no-op=true `
               --threads=1 `
               --split-count=0 `
-              --retries=2 `
+              --retries=3 `
               --retry-wait-time=10s
 
           if ($LASTEXITCODE -ne 0) {
@@ -632,19 +490,12 @@ jobs:
               throw 'No files were downloaded from the source.'
           }
 
-          Write-Host ''
-          Write-Host 'Downloaded files:'
-          Write-Host $files.Count
-
-          Write-Host ''
-          Write-Host 'Downloaded hierarchy:'
-
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
                   $env:STAGING_DIR.Length
-              ).TrimStart('\')
+              ).TrimStart('\', '/').Replace('\', '/')
 
-              Write-Host $relativePath
+              Write-Host "DOWNLOADED: $relativePath"
           }
 
           "FILE_COUNT=$($files.Count)" |
@@ -653,19 +504,18 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 15. CHECK EACH INCOMING FILE IN SCOUT
-      - name: Check incoming file names in Scout
-        id: file_check
+      # 11. CHECK EVERY INCOMING ARTIFACT
+      - name: Check incoming artifacts in Scout
         shell: pwsh
         env:
           CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+            ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'CHECK INCOMING FILES IN SCOUT'
+          Write-Host 'CHECK INCOMING ARTIFACTS'
           Write-Host '========================================'
 
           $files = @(
@@ -675,45 +525,37 @@ jobs:
                   -File
           )
 
-          if ($files.Count -eq 0) {
-              throw 'No local files are available for comparison.'
-          }
-
           $newCount = 0
           $existingCount = 0
 
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
                   $env:STAGING_DIR.Length
-              ).TrimStart('\', '/')
-
-              $relativePath = $relativePath.Replace('\', '/')
+              ).TrimStart('\', '/').Replace('\', '/')
 
               $targetArtifactPath = (
                   "$env:CLONE_TARGET/$relativePath"
               )
 
-              $searchOutput = & jf rt search `
-                  "$targetArtifactPath" `
-                  --server-id="$env:SCOUT_SERVER_ID" `
-                  --recursive=false `
-                  --include-dirs=false `
-                  --limit=1 `
-                  --quiet 2>&1
+              $searchOutput = @(
+                  & jf rt search `
+                      "$targetArtifactPath" `
+                      --server-id="$env:SCOUT_SERVER_ID" `
+                      --recursive=false `
+                      --include-dirs=false `
+                      --limit=1 2>&1
+              )
 
               $searchExitCode = $LASTEXITCODE
 
               if ($searchExitCode -ne 0) {
-                  Write-Host ''
-                  Write-Host 'Unable to check:'
-                  Write-Host $targetArtifactPath
-
-                  Write-Host ''
-                  Write-Host ($searchOutput -join :NewLine)
+                  Write-Host (
+                      $searchOutput -join :NewLine
+                  )
 
                   throw (
-                      'Failed while checking an incoming artifact ' +
-                      'in Scout.'
+                      'Failed to check Scout artifact: ' +
+                      $targetArtifactPath
                   )
               }
 
@@ -723,7 +565,7 @@ jobs:
 
               $artifactExists = $false
 
-              if ($searchText) {
+              if (-not :IsNullOrWhiteSpace($searchText)) {
                   try {
                       $searchResult = $searchText |
                           ConvertFrom-Json
@@ -733,49 +575,25 @@ jobs:
                       }
                   }
                   catch {
+                      Write-Host 'Raw JFrog response:'
+                      Write-Host $searchText
+
                       throw (
-                          'Could not interpret the JFrog search ' +
-                          "response for $targetArtifactPath."
+                          'Could not parse the JFrog search response ' +
+                          "for $targetArtifactPath."
                       )
                   }
               }
 
               if ($artifactExists) {
                   $existingCount++
-
-                  Write-Host ''
-                  Write-Host 'EXISTS - UPLOAD TO EXISTING PATH:'
-                  Write-Host $targetArtifactPath
+                  Write-Host "EXISTS, SAME PATH WILL BE USED: $relativePath"
               }
               else {
                   $newCount++
-
-                  Write-Host ''
-                  Write-Host 'NEW - ADD TO HOTFIX:'
-                  Write-Host $targetArtifactPath
+                  Write-Host "NEW, WILL BE ADDED: $relativePath"
               }
           }
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'FILE CHECK SUMMARY'
-          Write-Host '========================================'
-
-          Write-Host 'New files:'
-          Write-Host $newCount
-
-          Write-Host ''
-          Write-Host 'Existing matching paths:'
-          Write-Host $existingCount
-
-          Write-Host ''
-          Write-Host 'Total incoming files:'
-          Write-Host $files.Count
-
-          Write-Host ''
-          Write-Host (
-              'No existing Scout artifact has been deleted.'
-          )
 
           "NEW_FILE_COUNT=$newCount" |
               Out-File `
@@ -789,37 +607,20 @@ jobs:
                   -Encoding utf8 `
                   -Append
 
-      # 16. PREVIEW SCOUT HOTFIX MERGE
+          Write-Host ''
+          Write-Host "New files: $newCount"
+          Write-Host "Existing matching paths: $existingCount"
+          Write-Host "Total incoming files: $($files.Count)"
+          Write-Host 'No Scout content has been deleted.'
+
+      # 12. PREVIEW MERGE
       - name: Preview Scout hotfix merge
         shell: pwsh
         env:
           CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+            ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'PREVIEW SCOUT HOTFIX MERGE'
-          Write-Host '========================================'
-
-          Write-Host 'Upload Root:'
-          Write-Host $env:STAGING_DIR
-
-          Write-Host ''
-          Write-Host 'Scout Destination:'
-          Write-Host "$env:CLONE_TARGET/"
-
-          Write-Host ''
-          Write-Host (
-              'New files will be added. Files with the same ' +
-              'relative path will be uploaded to that path.'
-          )
-
-          Write-Host ''
-          Write-Host (
-              'No remote delete operation will be performed.'
-          )
 
           Push-Location $env:STAGING_DIR
 
@@ -840,39 +641,26 @@ jobs:
               Pop-Location
           }
 
-      # 17. ADD HOTFIX CONTENT TO SCOUT
-      - name: Add hotfix content to Scout
+      # 13. MERGE CONTENT INTO EXISTING HOTFIX
+      - name: Merge hotfix content into Scout
         shell: pwsh
         env:
           CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+            ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
 
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'ADD RIVIAN HOTFIX CONTENT TO SCOUT'
+          Write-Host 'MERGE HOTFIX CONTENT INTO SCOUT'
           Write-Host '========================================'
-
-          Write-Host 'Source:'
-          Write-Host $env:STAGING_DIR
-
-          Write-Host ''
-          Write-Host 'Destination:'
-          Write-Host "$env:CLONE_TARGET/"
-
-          Write-Host ''
-          Write-Host 'New files:'
-          Write-Host $env:NEW_FILE_COUNT
-
-          Write-Host ''
-          Write-Host 'Existing matching paths:'
-          Write-Host $env:EXISTING_FILE_COUNT
-
-          Write-Host ''
+          Write-Host "Destination: $env:CLONE_TARGET/"
+          Write-Host "New files: $env:NEW_FILE_COUNT"
           Write-Host (
-              'Existing folders and unrelated files will remain.'
+              "Existing matching paths: " +
+              $env:EXISTING_FILE_COUNT
           )
+          Write-Host 'No remote delete operation will be performed.'
 
           Push-Location $env:STAGING_DIR
 
@@ -896,23 +684,16 @@ jobs:
               Pop-Location
           }
 
-          Write-Host ''
-          Write-Host 'Hotfix content successfully added to Scout.'
-          Write-Host 'No unrelated Scout content was removed.'
+          Write-Host 'Hotfix content successfully merged into Scout.'
 
-      # 18. VERIFY EVERY UPLOADED FILE
-      - name: Verify uploaded Scout files
+      # 14. VERIFY EVERY INCOMING ARTIFACT
+      - name: Verify merged artifacts in Scout
         shell: pwsh
         env:
           CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+            ${{ steps.paths.outputs.clone_target }}
         run: |
           $ErrorActionPreference = 'Stop'
-
-          Write-Host ''
-          Write-Host '========================================'
-          Write-Host 'VERIFY UPLOADED SCOUT FILES'
-          Write-Host '========================================'
 
           $files = @(
               Get-ChildItem `
@@ -921,36 +702,34 @@ jobs:
                   -File
           )
 
-          if ($files.Count -eq 0) {
-              throw 'No local files are available for verification.'
-          }
-
           $verifiedCount = 0
 
           foreach ($file in $files) {
               $relativePath = $file.FullName.Substring(
                   $env:STAGING_DIR.Length
-              ).TrimStart('\', '/')
-
-              $relativePath = $relativePath.Replace('\', '/')
+              ).TrimStart('\', '/').Replace('\', '/')
 
               $targetArtifactPath = (
                   "$env:CLONE_TARGET/$relativePath"
               )
 
-              $searchOutput = & jf rt search `
-                  "$targetArtifactPath" `
-                  --server-id="$env:SCOUT_SERVER_ID" `
-                  --recursive=false `
-                  --include-dirs=false `
-                  --limit=1 `
-                  --quiet 2>&1
+              $searchOutput = @(
+                  & jf rt search `
+                      "$targetArtifactPath" `
+                      --server-id="$env:SCOUT_SERVER_ID" `
+                      --recursive=false `
+                      --include-dirs=false `
+                      --fail-no-op=true `
+                      --limit=1 2>&1
+              )
 
-              $searchExitCode = $LASTEXITCODE
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host (
+                      $searchOutput -join :NewLine
+                  )
 
-              if ($searchExitCode -ne 0) {
                   throw (
-                      'JFrog verification failed for: ' +
+                      'Artifact verification failed: ' +
                       $targetArtifactPath
                   )
               }
@@ -959,9 +738,9 @@ jobs:
                   $searchOutput -join :NewLine
               ).Trim()
 
-              if (-not $searchText) {
+              if (:IsNullOrWhiteSpace($searchText)) {
                   throw (
-                      'Uploaded artifact was not found: ' +
+                      'Artifact was not found after upload: ' +
                       $targetArtifactPath
                   )
               }
@@ -972,107 +751,60 @@ jobs:
               }
               catch {
                   throw (
-                      'Could not interpret the verification ' +
-                      "response for $targetArtifactPath."
+                      'Could not parse the verification response for: ' +
+                      $targetArtifactPath
                   )
               }
 
               if (@($searchResult).Count -eq 0) {
                   throw (
-                      'Uploaded artifact was not found: ' +
+                      'Artifact was not found after upload: ' +
                       $targetArtifactPath
                   )
               }
 
               $verifiedCount++
-
-              Write-Host 'VERIFIED:'
-              Write-Host $targetArtifactPath
+              Write-Host "VERIFIED: $relativePath"
           }
-
-          Write-Host ''
-          Write-Host 'Verified files:'
-          Write-Host $verifiedCount
 
           if ($verifiedCount -ne $files.Count) {
               throw (
-                  'Not all incoming files were verified in Scout.'
+                  'Not all incoming artifacts were verified in Scout.'
               )
           }
 
-          Write-Host ''
-          Write-Host 'All uploaded Scout files were verified.'
+          Write-Host "Verified artifacts: $verifiedCount"
 
-      # 19. TRANSFER SUMMARY
-      - name: Hotfix transfer summary
+      # 15. SUMMARY
+      - name: Transfer summary
         if: ${{ success() }}
         shell: pwsh
         env:
-          SOURCE_REPO: >-
-            ${{ steps.parse.outputs.source_repo }}
-
+          SOURCE_REPO: ${{ steps.paths.outputs.source_repo }}
           SOURCE_FOLDER_PATH: >-
-            ${{ steps.parse.outputs.source_folder_path }}
-
-          CLONE_TARGET: >-
-            ${{ steps.destination.outputs.clone_target }}
+            ${{ steps.paths.outputs.source_folder_path }}
+          CLONE_TARGET: ${{ steps.paths.outputs.clone_target }}
         run: |
           Write-Host ''
           Write-Host '========================================'
-          Write-Host 'RIVIAN TO SCOUT HOTFIX SUCCESSFUL'
+          Write-Host 'RIVIAN HOTFIX TRANSFER SUCCESSFUL'
           Write-Host '========================================'
-
-          Write-Host 'Rivian Source:'
           Write-Host (
-              "$env:SOURCE_REPO/" +
-              "$env:SOURCE_FOLDER_PATH"
+              "Source: $env:SOURCE_REPO/" +
+              $env:SOURCE_FOLDER_PATH
           )
-
-          Write-Host ''
-          Write-Host 'CW/OTA Folder:'
-          Write-Host $env:CALENDAR_WEEK
-
-          Write-Host ''
-          Write-Host 'Hotfix Folder:'
-          Write-Host $env:HOTFIX_NAME
-
-          Write-Host ''
-          Write-Host 'Scout Destination:'
-          Write-Host $env:CLONE_TARGET
-
-          Write-Host ''
-          Write-Host 'Total incoming files:'
-          Write-Host $env:FILE_COUNT
-
-          Write-Host ''
-          Write-Host 'New file paths:'
-          Write-Host $env:NEW_FILE_COUNT
-
-          Write-Host ''
-          Write-Host 'Existing matching file paths:'
-          Write-Host $env:EXISTING_FILE_COUNT
-
-          Write-Host ''
-          Write-Host 'Destination hierarchy:'
+          Write-Host "Destination: $env:CLONE_TARGET"
+          Write-Host "Total incoming files: $env:FILE_COUNT"
+          Write-Host "New files: $env:NEW_FILE_COUNT"
           Write-Host (
-              "$env:CALENDAR_WEEK/" +
-              "Hotfixes/" +
-              "$env:HOTFIX_NAME"
+              "Existing matching paths: " +
+              $env:EXISTING_FILE_COUNT
           )
+          Write-Host 'Existing unrelated hotfix content: PRESERVED'
+          Write-Host 'Release content: NOT MODIFIED'
+          Write-Host 'Remote delete: NOT PERFORMED'
 
-          Write-Host ''
-          Write-Host 'Existing Hotfix Content:'
-          Write-Host 'PRESERVED'
-
-          Write-Host ''
-          Write-Host 'Existing Release Content:'
-          Write-Host 'NOT MODIFIED'
-
-          Write-Host ''
-          Write-Host 'Remote Delete:'
-          Write-Host 'NOT PERFORMED'
-
-      # 20. CLEAN LOCAL TEMPORARY FILES
+      # 16. CLEAN LOCAL TEMPORARY FILES
       - name: Cleanup
         if: ${{ always() }}
         shell: pwsh
@@ -1100,7 +832,5 @@ jobs:
           jf c remove "$env:SOURCE_SERVER_ID" --quiet 2>$null
           jf c remove "$env:SCOUT_SERVER_ID" --quiet 2>$null
 
-          Write-Host ''
           Write-Host 'Local temporary files removed.'
-          Write-Host 'Temporary JFrog configurations removed.'
           Write-Host 'No remote Scout content was deleted.'
